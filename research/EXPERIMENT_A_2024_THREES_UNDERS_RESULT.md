@@ -19,3 +19,7 @@ The legacy all-bets report showed 59.43% hit rate and positive hypothetical -110
 Earlier 2025–26 exploratory 3PT unders were 260–120 with +8.25% actual-price ROI; that exploratory result did not replicate and must not override the independent test.
 
 This document summarizes the immutable GitHub Actions artifact; it does not modify the preregistration or model.
+
+## Vendor coverage qualification (Round 8)
+
+**Replication data outside vendor-documented coverage.** BALLDONTLIE's opening-odds documentation limits historical coverage to the most recently completed season and ongoing seasons where available. The 2024–25 opening prop quotes used here are outside that documented boundary as of October 2026. Pre-tip timestamps alone do not establish vendor-supported historical coverage. The frozen hypothesis did not pass and remains retired; these quotes should not be used as a validated independent historical benchmark.
