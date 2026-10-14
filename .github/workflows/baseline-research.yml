@@ -1,0 +1,40 @@
+name: NBA baseline research
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'v13/baseline.py'
+      - 'scripts/evaluate_baseline.py'
+      - 'tests/test_baseline.py'
+      - '.github/workflows/baseline-research.yml'
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Retrieve verified historical artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p research_data
+          gh run download 38517677388 --repo "${{ github.repository }}" --name nba-historical-games-and-diagnostics --dir research_data
+          test -f research_data/manifest.json
+      - name: Run chronological Elo benchmark
+        run: python -m scripts.evaluate_baseline
+      - name: Preserve research results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-v13-baseline-results
+          path: research_results/
+          retention-days: 90
