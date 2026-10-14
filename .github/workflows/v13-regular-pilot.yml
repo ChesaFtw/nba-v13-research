@@ -1,0 +1,52 @@
+name: V13 Regular Season 2025 Backtest Pilot
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/v13-regular-pilot.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: v13-regular-pilot
+  cancel-in-progress: false
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt numpy
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Download game index
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backfill_games --season 2025
+      - name: Download player box scores
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backfill_player_stats --season 2025 --max-pages 600 --out research_data/player_history/2025
+      - name: Validate regular-season sample and baseline
+        run: |
+          python -u -m scripts.regular_season_benchmark --season 2025 --games research_data/game_history/games_2025.jsonl --stats research_data/player_history/2025/player_stats_2025.jsonl --manifest research_data/player_history/2025/manifest.json
+      - name: Build pregame features from validated records
+        run: python -u -m scripts.build_prop_research --season 2025 --input research_results/regular_season/regular_players_2025.jsonl
+      - name: Run chronological walk-forward comparison
+        run: python -u -m scripts.walk_forward_prop_mae --input research_data/prop_research/props_2025.jsonl --out research_results/walkforward/walkforward_2025.json
+      - name: Preserve reusable raw source and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v13-regular-pilot-2025
+          path: |
+            research_data/game_history/games_2025.jsonl
+            research_data/player_history/2025/
+            research_results/regular_season/
+            research_results/walkforward/
+          retention-days: 30
+          if-no-files-found: warn
