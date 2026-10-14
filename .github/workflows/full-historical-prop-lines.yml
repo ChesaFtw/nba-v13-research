@@ -1,0 +1,36 @@
+name: V13 Full Historical Player Prop Lines
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/full-historical-prop-lines.yml'
+      - 'scripts/collect_full_prop_openings.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Retrieve verified 2025 game index
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38584634800 -n v13-regular-pilot-2025 -D .
+      - name: Collect full-season opening player prop lines
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u scripts/collect_full_prop_openings.py research_data/game_history/games_2025.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-full-opening-props-2025
+          path: research_results/prop_openings_full/
+          retention-days: 90
+          if-no-files-found: warn
