@@ -26,7 +26,7 @@ jobs:
       - name: Retrieve verified spread and total backtest
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download 38595817394 -n v13-opening-backtest-2025 -D research_results/opening_backtest
+        run: gh run download 38595817394 -n v13-opening-spread-total-backtest-2025 -D research_results/opening_backtest
       - name: Find input report paths
         run: find research_results -type f | sort
       - name: Run combined compounding portfolio
