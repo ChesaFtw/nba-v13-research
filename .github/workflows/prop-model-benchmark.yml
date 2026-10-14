@@ -1,0 +1,40 @@
+name: NBA first prop model competition
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/prop-model-benchmark.yml'
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        season: [2022, 2023, 2024, 2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Collect player-game box scores
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backfill_player_stats --season ${{ matrix.season }} --max-pages 600
+      - name: Create leakage-aware historical features
+        run: python -u -m scripts.build_prop_research --season ${{ matrix.season }} --input research_data/player_history/player_stats_${{ matrix.season }}.jsonl
+      - name: Select models on earlier games and evaluate later games
+        run: python -u -m scripts.benchmark_prop_models --season ${{ matrix.season }} --input research_data/prop_research/props_${{ matrix.season }}.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nba-prop-benchmark-${{ matrix.season }}
+          path: |
+            research_results/prop_model_benchmarks/
+            research_data/prop_research/report_*.json
+          retention-days: 90
+          if-no-files-found: warn
