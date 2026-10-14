@@ -15,7 +15,7 @@ def fetch_games(season, session=None, sleep=time.sleep):
     client = session or requests.Session()
     cursor, seen, games = None, set(), []
     for page in range(1, 31):
-        params = {"seasons[]": season, "per_page": 100}
+        params = {"seasons[]": season, "season_type": "regular", "per_page": 100}
         if cursor is not None:
             params["cursor"] = cursor
         for attempt in range(8):
@@ -56,7 +56,7 @@ def main():
     regular = [g for g in games if g.get("season") == args.season and g.get("postseason") is False]
     ids = [g.get("id") for g in regular]
     if len(regular) != 1230 or len(set(ids)) != 1230 or None in ids:
-        raise ValueError(f"Expected 1230 unique regular games, got {len(regular)}")
+        raise ValueError(f"Expected 1230 unique regular games, got {len(regular)}; source returned {len(games)} records. Inspect game types before retrying.")
     path = Path(args.out)
     path.mkdir(parents=True, exist_ok=True)
     with (path / f"games_{args.season}.jsonl").open("w") as output:
