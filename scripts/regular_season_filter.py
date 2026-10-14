@@ -1,4 +1,8 @@
-"""Filter player box scores using verified regular-season game IDs."""
+"""Filter historical box scores against a verified regular-season game index.
+
+Fail closed on incomplete, conflicting, or duplicate records. The player-stat
+endpoint may contain postseason and DNP rows even when pagination completes.
+"""
 import argparse
 import json
 from pathlib import Path
@@ -18,28 +22,44 @@ def minutes(value):
 
 
 def filter_regular(games, stats, season):
-    valid = {str(g["id"]): str(g["date"])[:10] for g in games
-             if g.get("season") == season and g.get("postseason") is False}
+    valid = {}
+    for game in games:
+        if game.get("season") != season or game.get("postseason") is not False:
+            continue
+        gid = game.get("id")
+        date = str(game.get("date") or "")[:10]
+        if gid is None or len(date) != 10:
+            raise ValueError("Invalid regular-season game index entry")
+        gid = str(gid)
+        if gid in valid:
+            raise ValueError("Duplicate regular-season game ID")
+        valid[gid] = date
     if len(valid) != 1230:
         raise ValueError(f"Expected 1230 regular games; found {len(valid)}")
-    out, seen = [], set()
-    for r in stats:
-        game = r.get("game") or {}
+
+    out, seen, covered = [], set(), set()
+    for row in stats:
+        game = row.get("game") or {}
         gid = str(game.get("id"))
-        if gid not in valid or minutes(r.get("min")) <= 0:
+        if gid not in valid or minutes(row.get("min")) <= 0:
             continue
-        if str(game.get("date", ""))[:10] != valid[gid]:
+        if str(game.get("date") or "")[:10] != valid[gid]:
             raise ValueError("Player-game date mismatch")
-        pid = (r.get("player") or {}).get("id")
+        if game.get("season") is not None and game["season"] != season:
+            raise ValueError("Player-game season mismatch")
+        pid = (row.get("player") or {}).get("id")
         if pid is None:
-            continue
+            raise ValueError("Missing player ID in played regular-season row")
         key = (gid, pid)
         if key in seen:
             raise ValueError("Duplicate player-game")
         seen.add(key)
-        out.append(r)
-    if len(out) < 10000 or len({r["game"]["id"] for r in out}) < 1200:
-        raise ValueError("Incomplete regular-season player coverage")
+        covered.add(gid)
+        out.append(row)
+    if len(covered) != 1230:
+        raise ValueError(f"Incomplete regular-season player coverage: {len(covered)}/1230 games")
+    if len(out) < 10000:
+        raise ValueError("Insufficient played regular-season player rows")
     return out
 
 
@@ -60,12 +80,13 @@ def main():
     folder = Path(a.out)
     folder.mkdir(parents=True, exist_ok=True)
     with (folder / f"player_stats_regular_{a.season}.jsonl").open("w") as f:
-        for r in rows:
-            f.write(json.dumps(r, separators=(",", ":")) + "\n")
+        for row in rows:
+            f.write(json.dumps(row, separators=(",", ":")) + "\n")
     report = {"season": a.season, "source_rows": len(source),
-              "regular_games": len(games), "played_regular_rows": len(rows),
+              "regular_games": len({r["game"]["id"] for r in rows}),
+              "played_regular_rows": len(rows),
               "excluded_rows": len(source)-len(rows),
-              "rule": "Verified regular game IDs, played minutes > 0"}
+              "rule": "Verified regular game IDs and complete 1230-game coverage, played minutes > 0"}
     (folder / f"manifest_{a.season}.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
 
