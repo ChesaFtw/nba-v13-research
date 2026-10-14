@@ -10,7 +10,7 @@ import requests
 from io import BytesIO
 
 URL="https://ak-static.cms.nba.com/referee/injury/Injury-Report_{day}_{clock}.pdf"
-CLOCKS=tuple(f"{hour:02d}_{minute:02d}{ampm}" for ampm in ("AM","PM") for hour in range(1,13) for minute in (0,15,30,45))
+CLOCKS=("05_15AM","06_00PM","05_00PM","01_00PM","11_00AM","08_00PM","12_00PM","09_00AM","07_00PM","03_00PM")
 def collect(start,end,out):
     from pypdf import PdfReader
     target=Path(out);target.parent.mkdir(parents=True,exist_ok=True)
