@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - 'scripts/audit_cached_seasons.py'
+      - 'scripts/backfill_games.py'
       - 'tests/test_audit_cached_seasons.py'
       - 'scripts/regular_season_benchmark.py'
       - 'scripts/walk_forward_prop_mae.py'
