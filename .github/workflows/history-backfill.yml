@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt
-      - run: pytest -q
+      - run: python -m pytest -q
       - name: Download regular-season games 2022-2025
         env:
           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
