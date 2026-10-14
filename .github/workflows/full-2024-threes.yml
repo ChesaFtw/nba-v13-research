@@ -1,0 +1,28 @@
+name: V13 Full 2024 Three Point Prop History
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/full-2024-threes.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Download 2024-25 historical opening three-point lines
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.collect_older_threes --season 2024
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-full-2024-threes-lines
+          path: research_data/multiseason_threes/2024/
+          retention-days: 90
