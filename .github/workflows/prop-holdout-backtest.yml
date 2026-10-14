@@ -1,0 +1,40 @@
+name: V13 Player Prop Holdout Backtest
+on:
+  workflow_run:
+    workflows: ["V13 Full Historical Player Prop Lines"]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  backtest:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt scikit-learn numpy
+      - run: python -m pytest -q
+      - name: Download historical 2025 player statistics
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38584634800 -n v13-regular-pilot-2025 -D .
+      - name: Download full historical opening prop lines
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38602363379 -n v13-full-opening-props-2025 -D research_results/prop_openings_full
+      - name: Build point-in-time player features
+        run: python -u -m scripts.build_prop_research --season 2025 --input research_results/regular_season/regular_players_2025.jsonl
+      - name: Run actual historical prop bets on frozen chronological holdout
+        run: python -u -m scripts.backtest_prop_holdout --features research_data/prop_research/props_2025.jsonl --lines research_results/prop_openings_full/opening_props_2025.jsonl --out research_results/prop_backtest/holdout_2025.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-prop-holdout-backtest-2025
+          path: research_results/prop_backtest/
+          retention-days: 90
+          if-no-files-found: warn
