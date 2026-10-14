@@ -7,6 +7,7 @@ on:
       - 'scripts/backfill_games.py'
       - 'requirements.txt'
       - 'tests/test_backfill_games.py'
+      - 'scripts/regular_season_benchmark.py'
   workflow_dispatch:
 permissions:
   contents: read
