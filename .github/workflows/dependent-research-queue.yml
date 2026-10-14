@@ -1,0 +1,65 @@
+name: NBA V13 dependent research queue
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/dependent-research-queue.yml'
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Collect historical game data once
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backfill_history --seasons 2022 2023 2024 2025
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-queue-historical-games
+          path: research_data/
+          retention-days: 90
+  validate:
+    needs: collect
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: v13-queue-historical-games
+          path: research_data/
+      - run: python -m scripts.research_checks --task data_quality
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-queue-data-quality
+          path: research_results/research_checks/
+  research:
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [rest_features, team_features, home_away, elo_holdout, elo_calibration, totals_baseline, scoring_distribution, confidence_audit, readiness]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: v13-queue-historical-games
+          path: research_data/
+      - name: Run independent research task
+        run: python -u -m scripts.research_checks --task ${{ matrix.task }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-queue-${{ matrix.task }}
+          path: research_results/research_checks/
+  final_gate:
+    needs: [validate, research]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "All ten historical diagnostics succeeded. Advanced injury, odds, lineup and prop modeling still require separate validated inputs."
