@@ -1,0 +1,47 @@
+name: NBA GOAT extra research sources
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/extra-source-collection.yml'
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - kind: advanced_v1
+            season: 2022
+          - kind: advanced_v1
+            season: 2023
+          - kind: advanced_v1
+            season: 2024
+          - kind: advanced_v2
+            season: 2025
+          - kind: opening_odds
+            season: 2025
+          - kind: injuries_snapshot
+            season: 2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Download NBA GOAT research dataset
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.collect_extra_sources --kind ${{ matrix.kind }} --season ${{ matrix.season }} --max-pages 600
+      - name: Preserve dataset and manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-extra-${{ matrix.kind }}-${{ matrix.season }}
+          path: research_data/extra_sources/
+          retention-days: 90
+          if-no-files-found: warn
