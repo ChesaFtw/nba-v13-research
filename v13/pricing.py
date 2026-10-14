@@ -108,3 +108,20 @@ def wilson(wins, n, z=1.96):
     centre = (p + z * z / (2 * n)) / denom
     half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
     return round(centre - half, 4), round(centre + half, 4)
+
+
+def power_devig_pair(odds_a, odds_b):
+    """Power de-vig: find k with pa^k + pb^k = 1 (pa, pb raw implied). Assigns more of the
+    margin to the longshot than multiplicative de-vig does (favourite-longshot bias)."""
+    pa, pb = implied_probability(odds_a), implied_probability(odds_b)
+    if pa + pb <= 1:
+        return pa / (pa + pb), pb / (pa + pb)
+    lo, hi = 1.0, 10.0
+    for _ in range(100):
+        k = (lo + hi) / 2
+        if pa ** k + pb ** k > 1:
+            lo = k
+        else:
+            hi = k
+    k = (lo + hi) / 2
+    return pa ** k, pb ** k

@@ -72,3 +72,30 @@ def test_live_logger_stamps_rows():
         logger.requests.Session = original
     assert n == 1 and len(rows) == 2
     assert all(r["retrieved_at_utc"] and r["tip_utc"] == "2026-10-21T23:30:00Z" for r in rows)
+
+
+def test_power_devig_and_prereg_runner():
+    from v13.pricing import power_devig_pair, no_vig_pair
+    po, pu = power_devig_pair(-178, 140)
+    assert abs(po + pu - 1) < 1e-9
+    mo, mu = no_vig_pair(-178, 140)
+    assert po > mo  # power gives the favourite more fair probability
+    from tests.test_pricing_and_v2 import synthetic_season
+    from scripts.prereg_threes_unders_2024 import run as prereg
+    feats, lines, games = synthetic_season(6, priced=True)
+    # one line opened after tip must be excluded, never graded
+    lines[-1]["opened_at"] = "2099-01-01T00:00:00Z"
+    out = prereg(feats, lines, games)
+    assert out["verdict"] in ("PASS", "FAIL", "UNTESTABLE")
+    assert set(out["checks"]) == {"unders_n_ge_150", "roi_gt_0", "excess_ge_2pts_multiplicative",
+                                  "excess_ge_2pts_power", "z_ge_2_multiplicative", "z_ge_2_power"}
+    assert "power" in out["primary_unders"] or out["primary_unders"]["decided"] == 0
+    assert out["verdict"] != "PASS"  # fairly priced synthetic market has no edge
+
+
+def test_selection_calibration_reports():
+    from scripts.rank_and_stake import selection_calibration
+    rows = [{"outcome": "win" if i % 2 else "loss", "price": -110, "p": 0.56, "ev": 0.07, "p_market": 0.5}
+            for i in range(100)]
+    r = selection_calibration(rows)
+    assert r["realized_hit"] == 0.5 and abs(r["realized_edge_share"]) < 1e-9

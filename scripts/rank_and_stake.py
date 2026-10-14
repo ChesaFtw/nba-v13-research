@@ -20,6 +20,28 @@ from v13.ranking import (STAKING, monte_carlo, parametric_monte_carlo, reliabili
 
 SHRINKS = (1.0, 0.5, 0.25, 0.0)
 
+
+def selection_calibration(chosen):
+    """Winner's-curse check: do the SELECTED bets win as often as the engine predicted?
+
+    Calibration fitted on all candidates can be right on average yet overconfident in the
+    extreme tail where selection happens. Compare predicted vs realized on the chosen set."""
+    d = [c for c in chosen if c["outcome"] in ("win", "loss")]
+    if not d:
+        return None
+    from v13.pricing import profit_per_unit
+    hit = sum(c["outcome"] == "win" for c in d) / len(d)
+    roi = sum(profit_per_unit(c["price"]) if c["outcome"] == "win" else -1 for c in d) / len(d)
+    p_hat = sum(c["p"] for c in d) / len(d)
+    p_mkt = [c["p_market"] for c in d if c.get("p_market") is not None]
+    return {"n": len(d), "predicted_hit": round(p_hat, 4), "realized_hit": round(hit, 4),
+            "predicted_ev_pct": round(100 * sum(c["ev"] for c in d) / len(d), 2), "realized_roi_pct": round(100 * roi, 2),
+            "market_hit": round(sum(p_mkt) / len(p_mkt), 4) if p_mkt else None,
+            "realized_edge_share": round((hit - sum(p_mkt) / len(p_mkt)) / (p_hat - sum(p_mkt) / len(p_mkt)), 3)
+            if p_mkt and abs(p_hat - sum(p_mkt) / len(p_mkt)) > 1e-6 else None,
+            "reading_guide": "realized_edge_share ~1 = edge as predicted; ~0 = none of the predicted edge was real; "
+                             "use it as the shrink factor in the sensitivity block."}
+
 TARGETS = (100, 150, 200, 250, 300)
 
 
@@ -64,6 +86,8 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
             "validation_count": len(select(val, tau)),
             "test": {**{f"{st}": {k: v for k, v in r.items() if k != "ledger"} for st, r in sims.items()},
                      **{f"monte_carlo_{st}": monte_carlo(r["ledger"], st, mc_paths) for st, r in sims.items()}},
+            "selected_bets_calibration_test": selection_calibration(chosen),
+            "selected_bets_calibration_validation": selection_calibration(select(val, tau)),
             "sensitivity": {f"{st}_shrink_{k}": parametric_monte_carlo(chosen, k, st, max(1000, mc_paths // 2))
                             for st in ("flat", "tiered") for k in SHRINKS},
             "test_ledger_flat": flat["ledger"]}
