@@ -8,9 +8,10 @@ on:
 jobs:
   integrate:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         season: [2022, 2023, 2024, 2025]
     steps:
@@ -23,7 +24,7 @@ jobs:
       - name: Collect advanced stats, full game only
         env:
           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
-        run: python -u -m scripts.collect_extra_sources --kind advanced_v2 --season ${{ matrix.season }} --max-pages 600
+        run: python -u -m scripts.collect_extra_sources --kind advanced_v2 --season ${{ matrix.season }} --max-pages 2000
       - name: Collect player stats
         env:
           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
