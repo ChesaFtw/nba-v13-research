@@ -1,0 +1,28 @@
+name: V13 Historical Three Point Prop Coverage 2022-2024
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/multiseason-threes-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Probe 2022-2024 season opening threes lines
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.probe_multiseason_threes
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-multiseason-threes-coverage
+          path: research_results/prop_multiseason_probe/
+          retention-days: 90
