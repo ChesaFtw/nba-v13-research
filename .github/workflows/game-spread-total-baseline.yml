@@ -1,0 +1,35 @@
+name: V13 2025 Game Spread Total Baseline
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/game-spread-total-baseline.yml'
+      - 'scripts/predict_game_spreads_totals.py'
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  game-baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Reuse complete 2025 game-index artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38584634800 -n v13-regular-pilot-2025 -D .
+      - name: Chronological score projection test
+        run: python -m scripts.predict_game_spreads_totals --games research_data/game_history/games_2025.jsonl --out research_results/game_baseline/game_predictions_2025.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-game-baseline-2025
+          path: research_results/game_baseline/
+          retention-days: 90
+          if-no-files-found: warn
