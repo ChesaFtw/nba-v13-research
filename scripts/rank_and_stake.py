@@ -15,7 +15,10 @@ import argparse, json
 from collections import Counter
 from pathlib import Path
 
-from v13.ranking import monte_carlo, reliability, select, simulate, tau_for_target, walk_forward_score
+from v13.ranking import (STAKING, monte_carlo, parametric_monte_carlo, reliability, select, simulate,
+                         tau_for_target, walk_forward_score)
+
+SHRINKS = (1.0, 0.5, 0.25, 0.0)
 
 TARGETS = (100, 150, 200, 250, 300)
 
@@ -25,12 +28,12 @@ def read(path):
 
 
 def run(candidates, validation_season=None, test_season=None, models=None, targets=TARGETS, mc_paths=10000,
-        split_date=None):
+        split_date=None, grouping="market"):
     """Seasons mode (preferred) or, when only one season has lines, split_date mode:
     validation = scored candidates before split_date, test = on/after it (counts scale with window length)."""
     if models:
         candidates = [c for c in candidates if c.get("model_version") in models]
-    scored, fits = walk_forward_score(candidates)
+    scored, fits = walk_forward_score(candidates, grouping=grouping)
     if split_date:
         pool = [c for c in scored if test_season is None or c.get("season") == test_season]
         val = [c for c in pool if c["date"] < split_date]
@@ -44,7 +47,7 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
     if split_date:
         days = lambda rows: len({c["date"] for c in rows})
         scale = days(val) / max(days(test), 1)
-    report = {"validation_season": validation_season, "test_season": test_season, "split_date": split_date,
+    report = {"grouping": grouping, "validation_season": validation_season, "test_season": test_season, "split_date": split_date,
               "validation_to_test_day_ratio": round(scale, 3),
               "scored_candidates": dict(Counter(c["market"] for c in scored)),
               "calibration_fits_last_period": fits[max(fits)],
@@ -54,14 +57,15 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
     for n in targets:
         tau = tau_for_target(val, max(1, round(n * scale)) if split_date else n)
         chosen = select(test, tau)
-        flat, tiered = simulate(chosen, "flat"), simulate(chosen, "tiered")
+        sims = {st: simulate(chosen, st) for st in STAKING}
+        flat = sims["flat"]
         report["sweep"][str(n)] = {
             "ev_lo_cutoff_from_validation": round(tau, 5),
             "validation_count": len(select(val, tau)),
-            "test": {"flat_1pct": {k: v for k, v in flat.items() if k != "ledger"},
-                     "tiered": {k: v for k, v in tiered.items() if k != "ledger"},
-                     "monte_carlo_flat": monte_carlo(flat["ledger"], "flat", mc_paths),
-                     "monte_carlo_tiered": monte_carlo(tiered["ledger"], "tiered", mc_paths)},
+            "test": {**{f"{st}": {k: v for k, v in r.items() if k != "ledger"} for st, r in sims.items()},
+                     **{f"monte_carlo_{st}": monte_carlo(r["ledger"], st, mc_paths) for st, r in sims.items()}},
+            "sensitivity": {f"{st}_shrink_{k}": parametric_monte_carlo(chosen, k, st, max(1000, mc_paths // 2))
+                            for st in ("flat", "tiered") for k in SHRINKS},
             "test_ledger_flat": flat["ledger"]}
     return report
 
@@ -74,19 +78,21 @@ def main():
     p.add_argument("--test-season", type=int)
     p.add_argument("--split-date", help="YYYY-MM-DD; single-season mode (weaker, exploratory)")
     p.add_argument("--mc-paths", type=int, default=10000)
+    p.add_argument("--grouping", choices=("market", "pooled"), default="market")
     p.add_argument("--out", required=True)
     a = p.parse_args()
     cands = [c for path in a.candidates for c in read(path)]
     models = set(a.models.split(",")) if a.models else None
     if not a.split_date and (a.validation_season is None or a.test_season is None):
         raise SystemExit("Give --validation-season and --test-season, or --split-date")
-    report = run(cands, a.validation_season, a.test_season, models, mc_paths=a.mc_paths, split_date=a.split_date)
+    report = run(cands, a.validation_season, a.test_season, models, mc_paths=a.mc_paths, split_date=a.split_date,
+                 grouping=a.grouping)
     out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, default=str) + "\n")
     brief = {k: v for k, v in report.items() if k != "sweep"}
     brief["sweep"] = {n: {"cutoff": s["ev_lo_cutoff_from_validation"], "validation_count": s["validation_count"],
                           **{k: {kk: vv for kk, vv in s["test"][k].items() if kk not in ("by_tier", "by_market")}
-                             for k in ("flat_1pct", "tiered")}} for n, s in report["sweep"].items()}
+                             for k in STAKING}} for n, s in report["sweep"].items()}
     print(json.dumps(brief, indent=2, default=str))
 
 

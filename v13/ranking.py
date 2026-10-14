@@ -111,8 +111,13 @@ def prepare(candidates):
     return sorted(out, key=lambda c: (c["date"], str(c["game_id"]), c["market"], str(c.get("player_id")), c["side"]))
 
 
-def walk_forward_score(candidates, refit="month", **cal_kwargs):
-    """Score every candidate with calibrators fitted only on candidates dated before its period."""
+def walk_forward_score(candidates, refit="month", grouping="market", **cal_kwargs):
+    """Score every candidate with calibrators fitted only on candidates dated before its period.
+
+    grouping="market": one calibrator per (market, model_version) [default].
+    grouping="pooled": one calibrator for all markets (Experiment B comparison).
+    """
+    key = (lambda c: (c["market"], c.get("model_version"))) if grouping == "market" else (lambda c: ("pooled", "all"))
     cands = prepare(candidates)
     period = (lambda d: d[:7]) if refit == "month" else (lambda d: d)
     periods = sorted({period(c["date"]) for c in cands})
@@ -122,13 +127,13 @@ def walk_forward_score(candidates, refit="month", **cal_kwargs):
         past = [c for c in cands if c["date"] < start]
         bymarket = defaultdict(list)
         for c in past:
-            bymarket[(c["market"], c.get("model_version"))].append(c)
+            bymarket[key(c)].append(c)
         cals = {m: Calibrator(**cal_kwargs).fit(rows) for m, rows in bymarket.items()}
         fits[per] = {f"{m}|{v}": cal.describe() for (m, v), cal in cals.items()}
         for c in cands:
             if period(c["date"]) != per:
                 continue
-            cal = cals.get((c["market"], c.get("model_version")))
+            cal = cals.get(key(c))
             p, p_lo = cal.predict(c) if cal else (None, None)
             if p is None:
                 continue
@@ -181,8 +186,25 @@ def select(scored, tau, per_game=2, per_player_game=1, daily_exposure=0.06, unit
     return chosen
 
 
+STAKING = ("flat", "tiered", "capped", "half")
+
+
+def stake_fraction(b, staking, unit=0.01):
+    """flat: 1% | tiered: 1/2/3% | capped: tiers capped at 2% | half: 0.5/1/1.5%."""
+    if staking == "flat":
+        return unit
+    t = b["tier_stake"]
+    if staking == "tiered":
+        return t
+    if staking == "capped":
+        return min(t, 0.02)
+    if staking == "half":
+        return t / 2
+    raise ValueError(staking)
+
+
 def simulate(bets, staking="flat", bankroll=10000.0, unit=0.01):
-    """Day-start staking. staking='flat' (1%) or 'tiered' (tier_stake)."""
+    """Day-start staking: every bet on a date is sized from the bankroll before that date's results."""
     led, peak, streak, worst_streak = [], bankroll, 0, 0
     byday = defaultdict(list)
     for b in bets:
@@ -190,8 +212,7 @@ def simulate(bets, staking="flat", bankroll=10000.0, unit=0.01):
     for day in sorted(byday):
         start = bankroll
         for b in byday[day]:
-            frac = unit if staking == "flat" else b["tier_stake"]
-            stake = round(start * frac, 2)
+            stake = round(start * stake_fraction(b, staking, unit), 2)
             o = b["outcome"]
             pnl = round(stake * (profit_per_unit(b["price"]) if o == "win" else -1 if o == "loss" else 0), 2)
             bankroll = round(bankroll + pnl, 2)
@@ -259,9 +280,8 @@ def monte_carlo(ledger, staking="flat", paths=10000, seed=7, unit=0.01, bankroll
         for i in rng.integers(0, len(days), len(days)):
             start = bank
             for b in days[i]:
-                frac = unit if staking == "flat" else b["tier_stake"]
                 o = b["outcome"]
-                bank += start * frac * (profit_per_unit(b["price"]) if o == "win" else -1 if o == "loss" else 0)
+                bank += start * stake_fraction(b, staking, unit) * (profit_per_unit(b["price"]) if o == "win" else -1 if o == "loss" else 0)
             peak = max(peak, bank); mdd = max(mdd, (peak - bank) / peak)
         ends.append(bank); dds.append(mdd)
     ends, dds = np.array(ends), np.array(dds)
@@ -292,3 +312,37 @@ def reliability(scored, bins=10):
         out["brier_market"] = round(sum((c["p_market"] - yy) ** 2 for c, yy in zip(rows, y)) / len(y), 5)
         out["logloss_market"] = round(ll([c["p_market"] for c in rows]), 5)
     return out
+
+
+def parametric_monte_carlo(bets, shrink=1.0, staking="flat", paths=5000, seed=11, unit=0.01, bankroll=10000.0):
+    """Sensitivity to weaker-than-estimated edge, keeping the real bet/price/day structure.
+
+    True win probability of each bet = p_market + shrink * (p - p_market):
+    shrink=1 -> our calibrated model is exactly right; 0.5 -> half the estimated edge is real;
+    0 -> the market is right (expected loss = the vig). Outcomes are re-drawn; pushes ignored.
+    """
+    rows = [b for b in bets if b.get("p_market") is not None and b.get("p") is not None]
+    if not rows:
+        return None
+    rng = np.random.default_rng(seed)
+    byday = defaultdict(list)
+    for b in rows:
+        byday[b["date"]].append(b)
+    days = [byday[d] for d in sorted(byday)]
+    ends, dds = [], []
+    for _ in range(paths):
+        bank, peak, mdd = bankroll, bankroll, 0.0
+        for day in days:
+            start = bank
+            for b in day:
+                p_true = min(max(b["p_market"] + shrink * (b["p"] - b["p_market"]), 0.0), 1.0)
+                win = rng.random() < p_true
+                bank += start * stake_fraction(b, staking, unit) * (profit_per_unit(b["price"]) if win else -1)
+            peak = max(peak, bank); mdd = max(mdd, (peak - bank) / peak)
+        ends.append(bank); dds.append(mdd)
+    ends, dds = np.array(ends), np.array(dds)
+    return {"shrink": shrink, "staking": staking, "mean_end": round(float(ends.mean())),
+            "p50": round(float(np.median(ends))), "prob_ge_15000": round(float((ends >= 15000).mean()), 4),
+            "prob_below_start": round(float((ends < bankroll).mean()), 4),
+            "median_max_drawdown_pct": round(100 * float(np.median(dds)), 2),
+            "p95_max_drawdown_pct": round(100 * float(np.percentile(dds, 95)), 2)}

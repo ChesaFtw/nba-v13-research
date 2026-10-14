@@ -198,3 +198,33 @@ def test_prop_candidate_export_is_out_of_sample_and_two_sided():
     scored, _ = walk_forward_score(cands)
     res = simulate(select(scored, 0.0), "flat")
     assert res["bets"] == 0 or res["roi_on_turnover_pct"] < 10  # fairly priced synthetic market
+
+
+def test_pooled_grouping_and_staking_variants():
+    from v13.ranking import stake_fraction, parametric_monte_carlo
+    rng = random.Random(9)
+    cands = []
+    for i in range(3000):
+        truth = rng.uniform(0.35, 0.65); win = rng.random() < truth
+        for mkt in ("a", "b"):
+            c = _cand(i, truth, win, day=f"2026-{1 + i // 600:02d}-{1 + i % 28:02d}", game=f"g{i}{mkt}", market=mkt)
+            c["candidate_id"] = f"{i}{mkt}"
+            cands.append(c)
+    pooled, fits = walk_forward_score(cands, grouping="pooled")
+    assert pooled and all("pooled|all" in f or not f for f in fits.values())
+    b = {"tier_stake": 0.03}
+    assert stake_fraction(b, "flat") == 0.01 and stake_fraction(b, "capped") == 0.02
+    assert stake_fraction(b, "half") == pytest.approx(0.015)
+    chosen = select(pooled, -1.0)[:200]
+    for c in chosen:
+        c["p_market"] = 0.5238 if c.get("p_market") is None else c["p_market"]
+    zero = parametric_monte_carlo(chosen, 0.0, "flat", paths=300)
+    assert zero["prob_below_start"] > 0.5  # with no real edge, the vig wins
+
+
+def test_feasibility_zero_edge_loses_and_big_edge_wins():
+    from scripts.bankroll_feasibility import simulate as fsim
+    none = fsim(200, [(-110, -110)], [(0.01, 1.0)], 0.0, paths=2000)
+    big = fsim(200, [(-110, -110)], [(0.02, 1.0)], 0.10, paths=2000)
+    assert none["median_end"] < 10000 and none["mean_roi_pct"] < 0
+    assert big["prob_ge_15000"] > 0.5
