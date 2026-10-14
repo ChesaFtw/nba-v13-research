@@ -10,7 +10,7 @@ import requests
 from io import BytesIO
 
 URL="https://ak-static.cms.nba.com/referee/injury/Injury-Report_{day}_{clock}.pdf"
-CLOCKS=("11_00AM","12_00PM","01_00PM","03_00PM","05_00PM","06_00PM","07_00PM","08_00PM","09_00PM","10_00PM")
+CLOCKS=tuple(f"{hour:02d}_{minute:02d}{ampm}" for ampm in ("AM","PM") for hour in range(1,13) for minute in (0,15,30,45))
 def collect(start,end,out):
     from pypdf import PdfReader
     target=Path(out);target.parent.mkdir(parents=True,exist_ok=True)
@@ -39,7 +39,7 @@ def collect(start,end,out):
                 except (requests.RequestException,ValueError,Exception) as exc:
                     # Do not fabricate availability when source cannot be parsed.
                     print(f"Snapshot unavailable {url}: {type(exc).__name__}",flush=True)
-                time.sleep(.08)
+                time.sleep(.015)
             total+=1;day+=timedelta(days=1)
     manifest={"dates_scanned":total,"snapshots_found":found,"missing_urls":missing,
         "data_type":"timestamped raw reports only; no model performance claimed",
