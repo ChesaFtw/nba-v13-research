@@ -1,0 +1,31 @@
+name: NBA full player statistics backfill
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/backfill_player_stats.py'
+      - '.github/workflows/player-stats-backfill.yml'
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Download full 2025 regular-season player game stats
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backfill_player_stats --season 2025 --max-pages 600
+      - name: Preserve historical player statistics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-player-stats-2025-full
+          path: research_data/player_history/
+          retention-days: 90
+          if-no-files-found: warn
