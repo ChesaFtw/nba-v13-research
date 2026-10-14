@@ -1,0 +1,40 @@
+name: V13 All Markets Portfolio Audit
+on:
+  workflow_run:
+    workflows: ["V13 Player Prop Holdout Backtest"]
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  portfolio:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Retrieve completed prop backtest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROP_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: gh run download "$PROP_RUN_ID" -n v13-prop-holdout-backtest-2025 -D research_results/prop_backtest
+      - name: Retrieve verified spread and total backtest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38595817394 -n v13-opening-backtest-2025 -D research_results/opening_backtest
+      - name: Find input report paths
+        run: find research_results -type f | sort
+      - name: Run combined compounding portfolio
+        run: python -u -m scripts.portfolio_all_markets --props research_results/prop_backtest/holdout_2025.json --games research_results/opening_backtest/backtest_2025.json --out research_results/portfolio/combined_2025.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-all-markets-portfolio-2025
+          path: research_results/portfolio/
+          retention-days: 90
+          if-no-files-found: warn
