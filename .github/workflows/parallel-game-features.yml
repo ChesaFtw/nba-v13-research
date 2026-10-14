@@ -1,0 +1,35 @@
+name: NBA parallel game feature collection
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/parallel-game-features.yml'
+      - 'scripts/build_game_features.py'
+jobs:
+  features:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        season: [2022, 2023, 2024, 2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Collect and calculate season features
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.build_game_features --season ${{ matrix.season }}
+      - name: Preserve season features
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-game-features-${{ matrix.season }}
+          path: research_data/game_features/
+          retention-days: 90
+          if-no-files-found: warn
