@@ -1,0 +1,52 @@
+name: NBA parallel prop feature research
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/parallel-prop-research.yml'
+      - 'scripts/build_prop_research.py'
+jobs:
+  props:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - season: 2022
+            run_id: 38519262564
+            artifact: nba-player-stats-2022-full
+          - season: 2023
+            run_id: 38519262564
+            artifact: nba-player-stats-2023-full
+          - season: 2024
+            run_id: 38519262564
+            artifact: nba-player-stats-2024-full
+          - season: 2025
+            run_id: 38518667697
+            artifact: nba-player-stats-2025-full
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Retrieve historical player data artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          run-id: ${{ matrix.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: research_data/player_history/
+      - name: Build chronological prop features and baseline diagnostics
+        run: python -u -m scripts.build_prop_research --season ${{ matrix.season }} --input research_data/player_history/player_stats_${{ matrix.season }}.jsonl
+      - name: Preserve prop research results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-prop-research-${{ matrix.season }}
+          path: research_data/prop_research/
+          retention-days: 90
+          if-no-files-found: warn
