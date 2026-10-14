@@ -1,5 +1,8 @@
 name: V13 All Markets Portfolio Audit
 on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/all-markets-portfolio.yml']
   workflow_run:
     workflows: ["V13 Player Prop Holdout Backtest"]
     types: [completed]
@@ -9,7 +12,7 @@ permissions:
   actions: read
 jobs:
   portfolio:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -21,7 +24,7 @@ jobs:
       - name: Retrieve completed prop backtest
         env:
           GH_TOKEN: ${{ github.token }}
-          PROP_RUN_ID: ${{ github.event.workflow_run.id }}
+          PROP_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || '38603243466' }}
         run: gh run download "$PROP_RUN_ID" -n v13-prop-holdout-backtest-2025 -D research_results/prop_backtest
       - name: Retrieve verified spread and total backtest
         env:
