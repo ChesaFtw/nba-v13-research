@@ -1,0 +1,37 @@
+name: NBA V13 missing research readiness queue
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/missing-research-readiness.yml'
+  schedule:
+    - cron: '15 12 * * *'
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        task:
+          - historical_prop_lines
+          - historical_injuries_lineups
+          - play_by_play_rotations
+          - defensive_matchups
+          - coaching_roster_history
+          - prop_models
+          - ensemble_comparison
+          - real_line_backtest
+          - confidence_calibration
+          - daily_prediction_tracking
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check actual prerequisite files
+        run: python -u -m scripts.missing_research_audit --task ${{ matrix.task }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-readiness-${{ matrix.task }}
+          path: research_results/readiness/
+          retention-days: 90
