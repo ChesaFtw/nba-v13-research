@@ -1,0 +1,34 @@
+name: NBA historical player statistics 2022-2024
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/player-stats-all-seasons.yml'
+jobs:
+  historical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        season: [2022, 2023, 2024]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Download complete historical season
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backfill_player_stats --season ${{ matrix.season }} --max-pages 600
+      - name: Preserve season data and manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nba-player-stats-${{ matrix.season }}-full
+          path: research_data/player_history/
+          retention-days: 90
+          if-no-files-found: warn
