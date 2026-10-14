@@ -5,6 +5,8 @@ on:
     paths:
       - '.github/workflows/v13-regular-pilot.yml'
       - 'scripts/backfill_games.py'
+      - 'requirements.txt'
+      - 'tests/test_backfill_games.py'
   workflow_dispatch:
 permissions:
   contents: read
