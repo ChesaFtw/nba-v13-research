@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import requests
 
 URL = "https://api.balldontlie.io/v1/games"
-PAGE_INTERVAL_SECONDS = 13.0
+PAGE_INTERVAL_SECONDS = float(os.getenv("BDL_PAGE_INTERVAL_SECONDS", "1.0"))
 MAX_RETRIES = 12
 
 def _retry_delay(response, attempt):
@@ -20,7 +20,7 @@ def _retry_delay(response, attempt):
                 return min(max(delta, 1), 180)
             except (ValueError, TypeError, OverflowError):
                 pass
-    return min(65 * (attempt + 1), 180)
+    return min(10 * (attempt + 1), 180)
 
 def fetch_season(season: int, session=None) -> list[dict]:
     if not 1990 <= season <= 2100:
