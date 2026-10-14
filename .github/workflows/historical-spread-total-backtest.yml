@@ -1,0 +1,42 @@
+name: V13 2025 Historical Opening Spread Total Backtest
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/historical-spread-total-backtest.yml'
+      - 'scripts/backtest_opening_spreads_totals.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements.txt
+      - name: Run unit tests
+        run: python -m pytest -q
+      - name: Reuse verified historical predictions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38592175377 -n v13-game-baseline-2025 -D research_results/game_baseline
+      - name: Probe historical opening odds API access
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backtest_opening_spreads_totals --predictions research_results/game_baseline/game_predictions_2025.jsonl --out research_results/odds_backtest/probe.json --probe-only
+      - name: Full 2025-26 spread and total backtest
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backtest_opening_spreads_totals --predictions research_results/game_baseline/game_predictions_2025.jsonl --out research_results/odds_backtest/full_2025.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-opening-spread-total-backtest-2025
+          path: research_results/odds_backtest/
+          retention-days: 90
+          if-no-files-found: warn
