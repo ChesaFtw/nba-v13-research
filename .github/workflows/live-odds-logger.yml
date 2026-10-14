@@ -1,0 +1,34 @@
+name: V13 Live odds logger (closing lines and CLV)
+on:
+  schedule:
+    - cron: '*/15 15-23 * * *'
+    - cron: '*/15 0-5 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: live-odds-logger
+  cancel-in-progress: false
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - id: log
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.log_live_odds --out-dir research_data/live_odds
+      - name: Upload snapshot to weekly release (append-only)
+        if: steps.log.outputs.rows != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="live-odds-${{ steps.log.outputs.week }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "Append-only BALLDONTLIE odds snapshots" --prerelease
+          gzip -9 "${{ steps.log.outputs.file }}"
+          gh release upload "$TAG" "${{ steps.log.outputs.file }}.gz"
