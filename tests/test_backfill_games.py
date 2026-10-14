@@ -13,7 +13,9 @@ class Response:
 class Session:
     def __init__(self, pages):
         self.pages = iter(pages)
+        self.calls = []
     def get(self, *args, **kwargs):
+        self.calls.append(kwargs.get("params", {}))
         return Response(next(self.pages))
 
 class GameIndexTests(unittest.TestCase):
@@ -27,6 +29,7 @@ class GameIndexTests(unittest.TestCase):
                 {"data": [{"id": 2}], "meta": {"next_cursor": None}},
             ])
             self.assertEqual(len(fetch_games(2024, session=session, sleep=lambda _: None)), 2)
+            self.assertTrue(all(call["season_type"] == "regular" for call in session.calls))
         finally:
             if previous is None:
                 os.environ.pop("BALLDONTLIE_API_KEY", None)
