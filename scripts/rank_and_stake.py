@@ -64,7 +64,13 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
         val = [c for c in scored if c.get("season") == validation_season]
         test = [c for c in scored if c.get("season") == test_season]
     if not val or not test:
-        raise RuntimeError(f"Need scored candidates in both seasons (validation {len(val)}, test {len(test)})")
+        # Never relabel seasons or borrow test months: report the gap and stop cleanly.
+        return {"status": "UNTESTABLE", "grouping": grouping,
+                "reason": f"no scored candidates in the {'validation' if not val else 'test'} window",
+                "validation_season": validation_season, "test_season": test_season, "split_date": split_date,
+                "raw_candidates_by_season": dict(Counter(str(c.get("season")) for c in candidates)),
+                "scored_candidates_by_season": dict(Counter(str(c.get("season")) for c in scored)),
+                "scored_validation": len(val), "scored_test": len(test)}
     scale = 1.0
     if split_date:
         days = lambda rows: len({c["date"] for c in rows})
@@ -113,6 +119,10 @@ def main():
                  grouping=a.grouping)
     out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2, default=str) + "\n")
+    if report.get("status") == "UNTESTABLE":
+        print(json.dumps(report, indent=2))
+        print("STATUS: UNTESTABLE (no relabelling; see reason)")
+        return
     brief = {k: v for k, v in report.items() if k != "sweep"}
     brief["sweep"] = {n: {"cutoff": s["ev_lo_cutoff_from_validation"], "validation_count": s["validation_count"],
                           **{k: {kk: vv for kk, vv in s["test"][k].items() if kk not in ("by_tier", "by_market")}

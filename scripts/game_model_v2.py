@@ -71,7 +71,9 @@ def build_rows(games, stats, odds):
     for gid, p in proj.items():
         o = lines.get(gid)
         if o is None:
-            coverage["no_pregame_line"] += 1; continue
+            coverage["no_pregame_line"] += 1
+            coverage[f"no_pregame_line_season_{p.get('season')}"] += 1
+            continue
         if "actual_margin" not in p:
             coverage["no_result"] += 1; continue
         for market in ("spread", "total"):
@@ -174,6 +176,9 @@ def main():
     rows, coverage = build_rows(games, stats, odds)
     cands, report = run(rows)
     report["coverage"] = dict(coverage); report["rows"] = len(rows)
+    report["rows_by_season"] = dict(Counter(str(r.get("season")) for r in rows))
+    report["candidates_by_season"] = dict(Counter(str(c.get("season")) for c in cands))
+    report["games_by_season"] = dict(Counter(str(g.get("season")) for g in games))
     for path, content in ((a.out_candidates, "".join(json.dumps(c) + "\n" for c in cands)),
                           (a.out_report, json.dumps(report, indent=2) + "\n")):
         Path(path).parent.mkdir(parents=True, exist_ok=True); Path(path).write_text(content)

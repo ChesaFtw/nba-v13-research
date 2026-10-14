@@ -53,9 +53,16 @@ def snapshot(key, now=None):
         for r in paged(s, "/nba/v2/odds", [("game_ids[]", str(x)) for x in ids[i:i + 10]], key):
             rows.append({"kind": "game_odds", "retrieved_at_utc": stamp, **r})
     for gid in ids:
-        payload = get(s, "/nba/v2/odds/player_props", [("game_id", str(gid))], key)
-        for r in payload.get("data", []):
-            rows.append({"kind": "player_prop", "retrieved_at_utc": stamp, **r})
+        cursor, seen = None, set()
+        while True:  # follow a cursor if the endpoint ever paginates; never assume one page
+            params = [("game_id", str(gid))] + ([("cursor", str(cursor))] if cursor is not None else [])
+            payload = get(s, "/nba/v2/odds/player_props", params, key)
+            for r in payload.get("data", []):
+                rows.append({"kind": "player_prop", "retrieved_at_utc": stamp, **r})
+            cursor = (payload.get("meta") or {}).get("next_cursor")
+            if cursor is None or str(cursor) in seen:
+                break
+            seen.add(str(cursor))
         time.sleep(0.1)
     tips = {str(g["id"]): g.get("datetime") for g in upcoming}
     for r in rows:

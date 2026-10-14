@@ -162,7 +162,8 @@ def simulate(rows, selector, threshold, pricing, sigma, bankroll=10000.0):
             ledger.append({"date": r["date"], "game_id": r["game_id"], "player_id": r["player_id"],
                            "market": r["market"], "vendor": r["vendor"], "opened_at": r["opened_at"],
                            "line": r["line"], "projection": round(r["projection"], 3), "side": side,
-                           "price": price, "score": round(score, 4), "market_prob": market_prob,
+                           "price": price, "over_odds": r["over_odds"], "under_odds": r["under_odds"],
+                           "score": round(score, 4), "market_prob": market_prob,
                            "outcome": outcome, "stake": stake, "pnl": pnl, "bankroll": bankroll,
                            "drawdown_pct": round(100 * (peak - bankroll) / peak, 3)})
     return summarize(ledger, skipped)
