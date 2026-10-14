@@ -125,11 +125,14 @@ def walk_forward_score(candidates, refit="month", grouping="market", **cal_kwarg
     for per in periods:
         start = min(c["date"] for c in cands if period(c["date"]) == per)
         past = [c for c in cands if c["date"] < start]
+        if past and max(c["date"] for c in past) >= start:  # structural leakage guard
+            raise AssertionError("calibration window overlaps the scored period")
         bymarket = defaultdict(list)
         for c in past:
             bymarket[key(c)].append(c)
         cals = {m: Calibrator(**cal_kwargs).fit(rows) for m, rows in bymarket.items()}
-        fits[per] = {f"{m}|{v}": cal.describe() for (m, v), cal in cals.items()}
+        fits[per] = {f"{m}|{v}": {**cal.describe(), "train_max_date": max((c["date"] for c in bymarket[(m, v)]), default=None),
+                                   "scored_period_start": start} for (m, v), cal in cals.items()}
         for c in cands:
             if period(c["date"]) != per:
                 continue
@@ -156,8 +159,14 @@ def kelly_tier(c, divisor=4.0):
     return 0.0, "pass"
 
 
-def select(scored, tau, per_game=2, per_player_game=1, daily_exposure=0.06, unit=0.01):
-    """Greedy by ev_lo within each day, subject to correlation and exposure limits."""
+def select(scored, tau, per_game=2, per_player_game=1, daily_exposure=0.06, unit=0.01, allow_pass=False):
+    """Greedy by ev_lo within each day, subject to correlation and exposure limits.
+
+    Only actionable bets are ever selected: conservative EV must be strictly positive and the
+    quarter-Kelly tier must be A/A+/A++. A PASS-tier candidate is never a selection (and is never
+    staked at a 1% floor). allow_pass=True exists only for diagnostics and must not feed reports.
+    """
+    tau = max(tau, 0.0) if not allow_pass else tau
     chosen = []
     byday = defaultdict(list)
     for c in scored:
@@ -166,10 +175,13 @@ def select(scored, tau, per_game=2, per_player_game=1, daily_exposure=0.06, unit
         games, player_games, game_markets = Counter(), Counter(), set()
         exposure = 0.0
         for c in sorted(byday[day], key=lambda c: -c["ev_lo"]):
-            if c["ev_lo"] < tau:
+            if c["ev_lo"] < tau or (not allow_pass and c["ev_lo"] <= 0):
                 break
             stake, tier = kelly_tier(c)
-            stake = max(stake, unit)
+            if tier == "pass":
+                if not allow_pass:
+                    continue
+                stake = unit
             gm = (str(c["game_id"]), c["market"], str(c.get("player_id")))
             if gm in game_markets or games[str(c["game_id"])] >= per_game:
                 continue
@@ -252,7 +264,7 @@ def summarize(led, worst_streak=None):
             "longest_losing_streak": worst_streak, "by_tier": tiers, "by_market": markets, "ledger": led}
 
 
-def tau_for_target(scored, target, lo=-0.05, hi=0.30, iters=40, **kw):
+def tau_for_target(scored, target, lo=0.0, hi=0.30, iters=40, **kw):
     """Smallest EV_lo cutoff whose selection count on `scored` does not exceed target."""
     if len(select(scored, lo, **kw)) <= target:
         return lo

@@ -45,6 +45,55 @@ def selection_calibration(chosen):
 TARGETS = (100, 150, 200, 250, 300)
 
 
+def rank_buckets(val, test, edges=(0.01, 0.05, 0.20)):
+    """Does a higher rank mean a better bet? EV_lo cut points are fixed on VALIDATION quantiles,
+    then test candidates (decided, with market price) are bucketed and graded."""
+    import math
+    from v13.pricing import profit_per_unit
+    v = sorted((c["ev_lo"] for c in val), reverse=True)
+    if not v:
+        return None
+    cuts = [v[min(len(v) - 1, int(len(v) * e))] for e in edges]
+    names = [f"top_{int(100 * edges[0])}pct"] + [f"{int(100 * a)}-{int(100 * b)}pct" for a, b in zip(edges, edges[1:])] + ["rest"]
+    buckets = {n: [] for n in names}
+    for c in test:
+        if c["outcome"] not in ("win", "loss") or c.get("p_market") is None:
+            continue
+        i = next((k for k, cut in enumerate(cuts) if c["ev_lo"] >= cut), len(cuts))
+        buckets[names[i]].append(c)
+    out = {"validation_cutpoints_ev_lo": [round(x, 5) for x in cuts]}
+    for n, rows in buckets.items():
+        if not rows:
+            out[n] = {"n": 0}; continue
+        w = sum(c["outcome"] == "win" for c in rows); exp = sum(c["p_market"] for c in rows)
+        var = sum(c["p_market"] * (1 - c["p_market"]) for c in rows)
+        out[n] = {"n": len(rows), "mean_p": round(sum(c["p"] for c in rows) / len(rows), 4),
+                  "realized_hit": round(w / len(rows), 4), "market_hit": round(exp / len(rows), 4),
+                  "excess": round((w - exp) / len(rows), 4), "z": round((w - exp) / math.sqrt(var), 2) if var else None,
+                  "roi_pct": round(100 * sum(profit_per_unit(c["price"]) if c["outcome"] == "win" else -1 for c in rows) / len(rows), 2)}
+    return out
+
+
+def game_cluster_bootstrap_roi(bets, reps=2000, seed=5):
+    """95% CI for flat ROI resampling whole GAMES (correlated props move together)."""
+    import numpy as np
+    from v13.pricing import profit_per_unit
+    by = {}
+    for b in bets:
+        if b["outcome"] in ("win", "loss"):
+            by.setdefault(str(b["game_id"]), []).append(profit_per_unit(b["price"]) if b["outcome"] == "win" else -1.0)
+    groups = list(by.values())
+    if len(groups) < 10:
+        return None
+    rng = np.random.default_rng(seed)
+    rois = []
+    for _ in range(reps):
+        pick = [groups[i] for i in rng.integers(0, len(groups), len(groups))]
+        flat = [x for g in pick for x in g]
+        rois.append(100 * sum(flat) / len(flat))
+    return {"games": len(groups), "roi_95ci_pct": [round(float(np.percentile(rois, 2.5)), 2), round(float(np.percentile(rois, 97.5)), 2)]}
+
+
 def read(path):
     return [json.loads(x) for x in Path(path).open() if x.strip()]
 
@@ -63,6 +112,10 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
     else:
         val = [c for c in scored if c.get("season") == validation_season]
         test = [c for c in scored if c.get("season") == test_season]
+    if val and test and max(c["date"] for c in val) >= min(c["date"] for c in test):
+        raise AssertionError("validation window overlaps test window")
+    if val and test and {c["candidate_id"] for c in val} & {c["candidate_id"] for c in test}:
+        raise AssertionError("candidate appears in both validation and test")
     if not val or not test:
         # Never relabel seasons or borrow test months: report the gap and stop cleanly.
         return {"status": "UNTESTABLE", "grouping": grouping,
@@ -81,6 +134,7 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
               "calibration_fits_last_period": fits[max(fits)],
               "reliability_test": {m: reliability([c for c in test if c["market"] == m])
                                    for m in sorted({c["market"] for c in test})},
+              "rank_buckets_test": rank_buckets(val, test),
               "sweep": {}}
     for n in targets:
         tau = tau_for_target(val, max(1, round(n * scale)) if split_date else n)
@@ -92,6 +146,9 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
             "validation_count": len(select(val, tau)),
             "test": {**{f"{st}": {k: v for k, v in r.items() if k != "ledger"} for st, r in sims.items()},
                      **{f"monte_carlo_{st}": monte_carlo(r["ledger"], st, mc_paths) for st, r in sims.items()}},
+            "actionable_qualified_in_test": len(chosen),
+            "shortfall_vs_target": max(0, n - len(chosen)),
+            "game_cluster_roi_ci": game_cluster_bootstrap_roi(chosen),
             "selected_bets_calibration_test": selection_calibration(chosen),
             "selected_bets_calibration_validation": selection_calibration(select(val, tau)),
             "sensitivity": {f"{st}_shrink_{k}": parametric_monte_carlo(chosen, k, st, max(1000, mc_paths // 2))
