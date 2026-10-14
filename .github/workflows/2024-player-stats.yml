@@ -1,0 +1,38 @@
+name: V13 2024 Regular Season Player Stats
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/2024-player-stats.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Download verified 2024-25 regular-season game index
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backfill_games --season 2024
+      - name: Download 2024-25 regular-season player box scores
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backfill_player_stats --season 2024 --max-pages 600 --out research_data/player_history/2024
+      - name: Validate and normalize player stats
+        run: python -u -m scripts.regular_season_benchmark --season 2024 --games research_data/game_history/games_2024.jsonl --stats research_data/player_history/2024/player_stats_2024.jsonl --manifest research_data/player_history/2024/manifest.json
+      - name: Build point-in-time features
+        run: python -u -m scripts.build_prop_research --season 2024 --input research_results/regular_season/regular_players_2024.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-2024-player-prop-features
+          path: |
+            research_data/prop_research/props_2024.jsonl
+            research_results/regular_season/
+          retention-days: 90
