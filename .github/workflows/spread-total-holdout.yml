@@ -1,0 +1,37 @@
+name: V13 Spread Total Chronological Holdout
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/spread-total-holdout.yml'
+      - 'scripts/run_spread_total_holdout.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  holdout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Download original verified pregame game predictions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38592175377 -n v13-game-baseline-2025 -D research_results/game_baseline
+      - name: Run spread and total chronological holdout at -110
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.run_spread_total_holdout --predictions research_results/game_baseline/game_predictions_2025.jsonl --out research_results/spread_total_holdout/report_2025.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-spread-total-holdout-2025
+          path: research_results/spread_total_holdout/
+          retention-days: 90
+          if-no-files-found: warn
