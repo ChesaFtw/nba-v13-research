@@ -1,0 +1,36 @@
+name: V13 Historical Prop Opening Probe
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/historical-prop-opening-probe.yml'
+      - 'scripts/probe_prop_openings.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Retrieve 2025 historical game index
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38584634800 -n v13-regular-pilot-2025 -D .
+      - name: Verify historical opening prop coverage
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u scripts/probe_prop_openings.py research_data/game_history/games_2025.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-historical-prop-opening-probe
+          path: research_results/prop_openings/
+          retention-days: 90
+          if-no-files-found: warn
