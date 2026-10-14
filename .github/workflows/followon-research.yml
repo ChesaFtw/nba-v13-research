@@ -1,0 +1,36 @@
+name: NBA V13 artifact-driven follow-on queue
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/followon-research.yml'
+  workflow_run:
+    workflows:
+      - NBA V13 seven-track research launch
+    types: [completed]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  evaluate-and-queue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download available research reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: v13-track-*
+          merge-multiple: true
+          path: research_results/track_inputs
+          run-id: ${{ github.event.workflow_run.id || '' }}
+          github-token: ${{ github.token }}
+        continue-on-error: true
+      - name: Identify verified follow-on gates
+        run: python -u -m scripts.followon_tracks
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-followon-readiness
+          path: research_results/followon/
+          retention-days: 90
