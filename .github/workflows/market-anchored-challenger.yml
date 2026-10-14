@@ -1,0 +1,37 @@
+name: V13 Market Anchored Holdout Challenger
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/market-anchored-challenger.yml'
+      - 'scripts/market_anchored_challenger.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  challenger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Download 2025 chronological predictions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38592175377 -n v13-game-baseline-2025 -D research_results/game_baseline
+      - name: Test trained market-anchored challenger on untouched final-quarter holdout
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.market_anchored_challenger --predictions research_results/game_baseline/game_predictions_2025.jsonl --out research_results/challenger/market_anchor_2025.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-market-anchored-holdout-2025
+          path: research_results/challenger/
+          retention-days: 90
+          if-no-files-found: warn
