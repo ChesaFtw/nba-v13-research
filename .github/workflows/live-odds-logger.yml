@@ -1,8 +1,9 @@
 name: V13 Live odds logger (closing lines and CLV)
 on:
   schedule:
-    - cron: '*/15 15-23 * * *'
-    - cron: '*/15 0-5 * * *'
+    - cron: '7 14-16 * * *'
+    - cron: '*/15 17-23 * * *'
+    - cron: '*/15 0-4 * * *'
   workflow_dispatch:
 permissions:
   contents: write
