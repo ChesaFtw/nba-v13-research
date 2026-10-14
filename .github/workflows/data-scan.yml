@@ -1,5 +1,11 @@
 name: NBA data scan
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/data-scan.yml'
+      - 'v13/bdl.py'
+      - 'scripts/daily_scan.py'
   workflow_dispatch:
   schedule:
     - cron: '0 14-23 * * *'
