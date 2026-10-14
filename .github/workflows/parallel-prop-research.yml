@@ -6,26 +6,15 @@ on:
     paths:
       - '.github/workflows/parallel-prop-research.yml'
       - 'scripts/build_prop_research.py'
+      - 'scripts/evaluate_prop_windows.py'
 jobs:
   props:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - season: 2022
-            run_id: 38519262564
-            artifact: nba-player-stats-2022-full
-          - season: 2023
-            run_id: 38519262564
-            artifact: nba-player-stats-2023-full
-          - season: 2024
-            run_id: 38519262564
-            artifact: nba-player-stats-2024-full
-          - season: 2025
-            run_id: 38518667697
-            artifact: nba-player-stats-2025-full
+        season: [2022, 2023, 2024, 2025]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,20 +22,39 @@ jobs:
           python-version: '3.11'
       - run: pip install -r requirements.txt
       - run: python -m pytest -q
-      - name: Retrieve historical player data artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          run-id: ${{ matrix.run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: research_data/player_history/
-      - name: Build chronological prop features and baseline diagnostics
+      - name: Collect season stats independently (no cross-run permissions required)
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backfill_player_stats --season ${{ matrix.season }} --max-pages 600
+      - name: Build historical prop features
         run: python -u -m scripts.build_prop_research --season ${{ matrix.season }} --input research_data/player_history/player_stats_${{ matrix.season }}.jsonl
-      - name: Preserve prop research results
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: nba-prop-research-${{ matrix.season }}
           path: research_data/prop_research/
           retention-days: 90
-          if-no-files-found: warn
+  evaluate:
+    needs: props
+    if: ${{ needs.props.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        season: [2022, 2023, 2024, 2025]
+        window: [5, 10, 20]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: nba-prop-research-${{ matrix.season }}
+          path: research_data/prop_research/
+      - name: Evaluate independent prop market windows
+        run: python -u -m scripts.evaluate_prop_windows --season ${{ matrix.season }} --window ${{ matrix.window }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nba-prop-window-${{ matrix.season }}-${{ matrix.window }}
+          path: research_data/prop_evaluation/
+          retention-days: 90
