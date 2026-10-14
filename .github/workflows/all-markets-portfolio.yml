@@ -30,7 +30,7 @@ jobs:
       - name: Find input report paths
         run: find research_results -type f | sort
       - name: Run combined compounding portfolio
-        run: python -u -m scripts.portfolio_all_markets --props research_results/prop_backtest/holdout_2025.json --games research_results/opening_backtest/backtest_2025.json --out research_results/portfolio/combined_2025.json
+        run: python -u -m scripts.portfolio_all_markets --props research_results/prop_backtest/holdout_2025.json --games research_results/opening_backtest/full_2025.json --out research_results/portfolio/combined_2025.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
