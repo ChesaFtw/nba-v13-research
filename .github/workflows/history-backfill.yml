@@ -1,5 +1,5 @@
 name: Historical NBA games backfill
-run-name: Historical NBA backfill validation
+run-name: Historical NBA backfill with diagnostics
 on:
   workflow_dispatch:
   push:
@@ -16,14 +16,28 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt
-      - run: python -m pytest -q
-      - name: Download regular-season games 2022-2025
+      - name: Validate imports and tests
+        run: |
+          pwd
+          python -c "import v13, v13.history; print('NBA package import OK')"
+          python -m pytest -q
+      - name: Download historical regular-season games
+        id: historical
+        continue-on-error: true
         env:
           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
-        run: python -m scripts.backfill_history --seasons 2022 2023 2024 2025
-      - name: Preserve historical data as downloadable artifact
+        run: |
+          mkdir -p research_data
+          python -u -m scripts.backfill_history --seasons 2022 2023 2024 2025 2>&1 | tee research_data/backfill.log
+          exit ${PIPESTATUS[0]}
+      - name: Preserve diagnostic logs and downloaded games
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nba-historical-games-2022-2025
+          name: nba-historical-games-and-diagnostics
           path: research_data/
           retention-days: 90
+          if-no-files-found: warn
+      - name: Fail if historical download failed
+        if: steps.historical.outcome == 'failure'
+        run: exit 1
