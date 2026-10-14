@@ -1,0 +1,37 @@
+name: NBA V13 trained prop models
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/trained-prop-models.yml'
+jobs:
+  ridge-models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        season: [2022, 2023, 2024, 2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt numpy
+      - name: Collect player history
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backfill_player_stats --season ${{ matrix.season }} --max-pages 600
+      - name: Build point-in-time features
+        run: python -u -m scripts.build_prop_research --season ${{ matrix.season }} --input research_data/player_history/player_stats_${{ matrix.season }}.jsonl
+      - name: Fit ridge and evaluate frozen future dates
+        run: python -u -m scripts.train_prop_ridge --season ${{ matrix.season }} --input research_data/prop_research/props_${{ matrix.season }}.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-trained-props-${{ matrix.season }}
+          path: research_results/trained_prop_models/
+          retention-days: 90
+          if-no-files-found: warn
