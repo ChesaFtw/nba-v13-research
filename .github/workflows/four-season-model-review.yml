@@ -1,0 +1,30 @@
+name: NBA V13 four-season model accuracy review
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/four-season-model-review.yml'
+permissions:
+  actions: read
+  contents: read
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          run-id: 38522694495
+          pattern: v13-trained-props-*
+          merge-multiple: true
+          path: research_results/input
+          github-token: ${{ github.token }}
+      - name: Evaluate model gains on holdout games
+        run: python -u -m scripts.review_trained_models
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-four-season-model-review
+          path: research_results/model_review/
+          retention-days: 90
