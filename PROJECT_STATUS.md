@@ -1,25 +1,21 @@
-# NBA V13 — foundation status
+# NBA V13 — implementation status
 
-This repository is an **early, unvalidated research scaffold**, not a trained or backtested betting model.
+Early, **unvalidated** research scaffold. No trained model, no betting picks.
 
 ## Implemented
-- Secret-based BALLDONTLIE games endpoint ingestion with pagination
-- A scheduled GitHub Actions data inventory and manual trigger
-- Transparent implied-probability and expected-return math
-- Unit tests in CI
+- BALLDONTLIE games ingestion using GitHub Actions secret, pagination, explicit preseason and regular-season filters
+- Diagnostic scan for current and next Central-time date plus historical regular-season control (2024-10-22)
+- Unit tests for market math and request parameters; GitHub Actions CI
+- Scheduled scan and manual workflow trigger
 
-## Not implemented
-- Historical point-in-time datasets, odds history, injuries, player props
-- Trained or calibrated predictive models, independent challengers
-- Nested walk-forward backtesting, bankroll tracking, graded picks
-- Caesars Kansas sportsbook prices or 15-minute-before-tip dynamic scheduling
-- Automated alerts or persistent data warehouse
+## Still required
+- Confirm diagnostic workflow outputs nonzero historical games and preseason games when scheduled
+- Persist datasets and build chronological, leakage-safe feature pipeline
+- Build and calibrate predictive models; nested walk-forward out-of-sample validation
+- Injuries, player props, market snapshots, bankroll tracker, alerts, 15-minute-before-tip scans
 
-## Security
-Never commit API keys. Add BALLDONTLIE_API_KEY at Settings > Secrets and variables > Actions.
-The workflow will fail until that secret is configured. Workflow cron is UTC and is only an
-approximation of the intended Central Time window; daylight saving and per-tip scans remain TODO.
-
-## Betting research
-Default -110 is an assumed research price only, not a live executable quote.
-Do not interpret any output as a validated edge.
+## Notes
+The NBA games API excludes preseason by default, so explicit season_type=preseason is essential.
+Dates are computed using America/Chicago, with two dates queried to cover UTC boundaries.
+No API keys are committed. GitHub Actions must have BALLDONTLIE_API_KEY configured.
+Default -110 is a hypothetical research assumption, not an executable sportsbook price.
