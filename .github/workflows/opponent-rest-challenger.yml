@@ -1,0 +1,39 @@
+name: V13 Opponent Rest Challenger 2025
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/opponent-rest-challenger.yml'
+      - 'scripts/opponent_rest_challenger.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Retrieve verified 2025 regular season game index
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38584634800 -n v13-regular-pilot-2025 -D .
+      - name: Build strictly pregame opponent/rest challenger
+        run: python -u -m scripts.opponent_rest_challenger --games research_data/game_history/games_2025.jsonl --out research_results/opponent_rest/predictions_2025.jsonl
+      - name: Evaluate challenger against historical opening lines at -110
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.backtest_opening_spreads_totals --predictions research_results/opponent_rest/predictions_2025.jsonl --out research_results/opponent_rest/backtest_2025.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-opponent-rest-challenger-2025
+          path: research_results/opponent_rest/
+          retention-days: 90
+          if-no-files-found: warn
