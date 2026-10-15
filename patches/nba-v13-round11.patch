@@ -1,0 +1,487 @@
+From 3ba11e5652841808f852ca0d04d72818a718c3d6 Mon Sep 17 00:00:00 2001
+From: Claude audit <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 20:38:14 -0500
+Subject: [PATCH] Round 11: pregame matchup/career-stage features from box
+ scores, BH-controlled information test vs de-vigged price, R11
+ pre-registration
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ PREREG_R11_MATCHUP_INFO.md   |  45 +++++++++
+ scripts/feature_info_test.py | 189 +++++++++++++++++++++++++++++++++++
+ tests/test_round11.py        |  83 +++++++++++++++
+ v13/matchup_features.py      | 123 +++++++++++++++++++++++
+ 4 files changed, 440 insertions(+)
+ create mode 100644 PREREG_R11_MATCHUP_INFO.md
+ create mode 100644 scripts/feature_info_test.py
+ create mode 100644 tests/test_round11.py
+ create mode 100644 v13/matchup_features.py
+
+diff --git a/PREREG_R11_MATCHUP_INFO.md b/PREREG_R11_MATCHUP_INFO.md
+new file mode 100644
+index 0000000..0ea1afb
+--- /dev/null
++++ b/PREREG_R11_MATCHUP_INFO.md
+@@ -0,0 +1,45 @@
++# Pre-registration R11: do matchup and career-stage features add information beyond the opening price?
++
++**Committed before any R11 statistic is computed on real data.** None of these features has been computed on real data before.
++
++## Question
++For each (market, feature) pair below: does adding the feature to the de-vigged opening price reduce **out-of-sample log loss** for over/under outcomes?
++
++This is an *information* test. It is not a betting rule.
++
++## Frozen registry (`scripts/feature_info_test.py`, `REGISTRY`)
++
++| Market | Features |
++|---|---|
++| Rebounds | `height_diff`, `opp_missed_fg`, `own_missed_fg`, `height_x_oppmiss`, `opp_fg3a_rate` |
++| Points | `h2h_resid_points`, `years_since_draft`, `yrs_x_b2b` |
++| Assists | `h2h_resid_assists`, `years_since_draft`, `yrs_x_b2b` |
++
++Feature definitions are in `v13/matchup_features.py`. Every feature uses only games dated strictly before the game. `years_since_draft` is a career-stage proxy, because BALLDONTLIE has no birth dates. Head-to-head history uses every supplied season of box scores (2023-24 onward), shrunk with k = 5.
++
++## Data
++- Gated 2025-26 opening props: the `bdl_opening_player_props` gate.
++- One line per player-game-market, by fixed vendor priority.
++- Played-minutes box scores only (DNPs are void); pushes are excluded.
++
++## Design
++- **Train:** dates before 2026-02-01. **Test:** dates on or after 2026-02-01.
++- **Baseline model:** logistic regression of the over outcome on logit(p_market, power de-vig).
++- **Challenger:** the baseline plus the standardized feature.
++- **Uncertainty:** game-cluster bootstrap (1,000 resamples) of the test log-loss difference.
++- **Multiple testing:** Benjamini–Hochberg at q = 0.10 across all tested pairs.
++
++## Frozen pass rule (per pair)
++**PASS only if all hold:**
++- the test log-loss difference is < 0;
++- the pair is BH-significant;
++- the feature's coefficient has the same sign when fitted on each half of the training period.
++
++**Anything else is a FAIL.** No feature, threshold, split or market may be added after results are seen. Any new idea goes into a new pre-registration.
++
++## What a PASS licenses
++2025-26 prop prices have been used for earlier, different hypotheses, but never with these features. So a PASS is single-season evidence of information. It licenses only:
++1. a pre-registered betting rule built from the passing feature;
++2. a 2026-27 shadow test of that rule, graded at logger-captured prices and on CLV.
++
++It does not license staking.
+diff --git a/scripts/feature_info_test.py b/scripts/feature_info_test.py
+new file mode 100644
+index 0000000..6b1054e
+--- /dev/null
++++ b/scripts/feature_info_test.py
+@@ -0,0 +1,189 @@
++"""Does a pre-registered feature carry information the de-vigged opening price does not?
++
++For each (market, feature) in REGISTRY:
++  baseline   logit P(over) = a + b * logit(p_market)            (the price, recalibrated)
++  challenger logit P(over) = a + b * logit(p_market) + c * z(feature)
++Both fitted on TRAIN (dates < split); scored on TEST (dates >= split) by log loss.
++  delta = test log loss(challenger) - test log loss(baseline)    (negative = information)
++Uncertainty: game-cluster bootstrap of delta (props from one game are correlated).
++Multiple testing: Benjamini-Hochberg at q = 0.10 over every (market, feature) test.
++A feature PASSES only if: delta < 0, BH-significant, and the sign of c is the same when
++fitted separately on the two halves of TRAIN (stability). Nothing here is a betting rule.
++
++Inputs: provenance-gated opening props, played-minutes box scores (all seasons available, so
++head-to-head history reaches back), game index(es).
++"""
++import argparse, json, math
++from collections import Counter, defaultdict
++from pathlib import Path
++
++import numpy as np
++
++from scripts.backtest_prop_holdout import ALIASES, VENDORS
++from v13.matchup_features import STATS, build
++from v13.pricing import power_devig_pair, prop_prices
++from v13.provenance import require_eligible
++
++REGISTRY = {
++    "rebounds": ["height_diff", "opp_missed_fg", "own_missed_fg", "height_x_oppmiss", "opp_fg3a_rate"],
++    "points": ["h2h_resid_points", "years_since_draft", "yrs_x_b2b"],
++    "assists": ["h2h_resid_assists", "years_since_draft", "yrs_x_b2b"],
++}
++SPLIT_DATE = "2026-02-01"
++FDR_Q = 0.10
++BOOT = 1000
++
++
++def read(p):
++    return [json.loads(x) for x in Path(p).open() if x.strip()]
++
++
++def logit(p):
++    p = min(max(p, 1e-4), 1 - 1e-4)
++    return math.log(p / (1 - p))
++
++
++def fit_logistic(X, y, ridge=1e-3, iters=60):
++    beta = np.zeros(X.shape[1])
++    pen = np.eye(X.shape[1]) * ridge; pen[0, 0] = 0
++    for _ in range(iters):
++        p = 1 / (1 + np.exp(-(X @ beta)))
++        g = X.T @ (y - p) - pen @ beta
++        H = X.T @ (X * (p * (1 - p))[:, None]) + pen
++        step = np.linalg.solve(H, g); beta += step
++        if np.max(np.abs(step)) < 1e-9:
++            break
++    return beta
++
++
++def loglik_terms(X, y, beta):
++    p = np.clip(1 / (1 + np.exp(-(X @ beta))), 1e-6, 1 - 1e-6)
++    return -(y * np.log(p) + (1 - y) * np.log(1 - p))
++
++
++def candidates(props, stats, games):
++    feats = build(stats, games)
++    actual = {}
++    for r in stats:
++        g, pl = r.get("game") or {}, r.get("player") or {}
++        if g.get("id") is not None and pl.get("id") is not None:
++            actual[(str(g["id"]), str(pl["id"]))] = r
++    date_of = {str(g["id"]): str(g["date"])[:10] for g in games}
++    best = {}
++    for r in props:
++        m = ALIASES.get(r.get("prop_type"))
++        if m not in REGISTRY or (r.get("market") or {}).get("type") != "over_under":
++            continue
++        over, under = prop_prices(r)
++        if over is None or under is None or r.get("line_value") is None:
++            continue
++        key = (str(r["game_id"]), str(r["player_id"]), m)
++        v = str(r.get("vendor") or "").lower()
++        rank = (VENDORS.index(v) if v in VENDORS else 99, str(r.get("opened_at")))
++        if key not in best or rank < best[key][0]:
++            best[key] = (rank, float(r["line_value"]), over, under)
++    out, skipped = [], Counter()
++    for (gid, pid, m), (_, line, over, under) in best.items():
++        box = actual.get((gid, pid))
++        if box is None:
++            skipped["no_box_score_(DNP_void)"] += 1; continue
++        val = float(box.get(STATS[m]) or 0)
++        if abs(val - line) < 1e-9:
++            skipped["push"] += 1; continue
++        f = feats.get((gid, pid))
++        if f is None:
++            skipped["no_features"] += 1; continue
++        out.append({"game_id": gid, "date": date_of.get(gid, ""), "market": m, "y": int(val > line),
++                    "lp": logit(power_devig_pair(over, under)[0]), "f": f})
++    return out, skipped
++
++
++def test_feature(rows, feature, split=SPLIT_DATE, seed=11):
++    rows = [r for r in rows if r["f"].get(feature) is not None]
++    tr = [r for r in rows if r["date"] < split]; te = [r for r in rows if r["date"] >= split]
++    if len(tr) < 500 or len(te) < 300:
++        return {"status": "insufficient", "train": len(tr), "test": len(te)}
++    mu = np.mean([r["f"][feature] for r in tr]); sd = np.std([r["f"][feature] for r in tr])
++    if sd < 1e-12:
++        return {"status": "no_variance", "train": len(tr), "test": len(te)}
++    def mats(rs, with_f):
++        cols = [np.ones(len(rs)), np.array([r["lp"] for r in rs])]
++        if with_f:
++            cols.append((np.array([r["f"][feature] for r in rs]) - mu) / sd)
++        return np.column_stack(cols), np.array([r["y"] for r in rs], dtype=float)
++    Xb, y = mats(tr, False); Xc, _ = mats(tr, True)
++    bb, bc = fit_logistic(Xb, y), fit_logistic(Xc, y)
++    half = sorted(tr, key=lambda r: r["date"]); h1, h2 = half[:len(half) // 2], half[len(half) // 2:]
++    c1 = fit_logistic(*mats(h1, True))[2]; c2 = fit_logistic(*mats(h2, True))[2]
++    Tb, yt = mats(te, False); Tc, _ = mats(te, True)
++    d = loglik_terms(Tc, yt, bc) - loglik_terms(Tb, yt, bb)
++    games = defaultdict(list)
++    for r, di in zip(te, d):
++        games[r["game_id"]].append(di)
++    g = [np.array(v) for v in games.values()]
++    rng = np.random.default_rng(seed)
++    boots = []
++    for _ in range(BOOT):
++        pick = [g[i] for i in rng.integers(0, len(g), len(g))]
++        boots.append(np.concatenate(pick).mean())
++    boots = np.array(boots)
++    return {"status": "tested", "train": len(tr), "test": len(te), "test_games": len(g),
++            "coef_std": round(float(bc[2]), 4), "coef_half1": round(float(c1), 4), "coef_half2": round(float(c2), 4),
++            "sign_stable": bool(np.sign(c1) == np.sign(c2) == np.sign(bc[2])),
++            "delta_logloss": round(float(d.mean()), 6),
++            "delta_95ci": [round(float(np.percentile(boots, 2.5)), 6), round(float(np.percentile(boots, 97.5)), 6)],
++            "p_one_sided": round(float((boots >= 0).mean()), 4),
++            "baseline_test_logloss": round(float(loglik_terms(Tb, yt, bb).mean()), 5)}
++
++
++def benjamini_hochberg(pvals, q=FDR_Q):
++    order = sorted(range(len(pvals)), key=lambda i: pvals[i])
++    k = 0
++    for rank, i in enumerate(order, 1):
++        if pvals[i] <= q * rank / len(pvals):
++            k = rank
++    passed = set(order[:k])
++    return [i in passed for i in range(len(pvals))]
++
++
++def run(props, stats, games, validated=True):
++    if validated:
++        require_eligible(props, "feature information test")
++    rows, skipped = candidates(props, stats, games)
++    results, keys, pv = {}, [], []
++    for m, fs in REGISTRY.items():
++        mr = [r for r in rows if r["market"] == m]
++        for f in fs:
++            res = test_feature(mr, f)
++            results[f"{m}|{f}"] = res
++            if res["status"] == "tested":
++                keys.append(f"{m}|{f}"); pv.append(res["p_one_sided"])
++    sig = benjamini_hochberg(pv) if pv else []
++    for k, s in zip(keys, sig):
++        r = results[k]
++        r["bh_significant"] = s
++        r["verdict"] = "PASS" if (s and r["delta_logloss"] < 0 and r["sign_stable"]) else "FAIL"
++    return {"registry": REGISTRY, "split_date": SPLIT_DATE, "fdr_q": FDR_Q, "tests": len(keys),
++            "evidence_class": "validated" if validated else "exploratory_unverified_prices",
++            "rows_by_market": dict(Counter(r["market"] for r in rows)), "skipped": dict(skipped),
++            "results": results, "passing": [k for k in keys if results[k]["verdict"] == "PASS"],
++            "reading_guide": "PASS = the feature improved out-of-sample log loss beyond the de-vigged opening price, "
++                             "survived BH-FDR and kept its sign in both training halves. It is information, not yet a bet."}
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--props", required=True)
++    p.add_argument("--stats", action="append", required=True)
++    p.add_argument("--games", action="append", required=True)
++    p.add_argument("--out", required=True)
++    a = p.parse_args()
++    res = run(read(a.props), [s for f in a.stats for s in read(f)], [g for f in a.games for g in read(f)])
++    Path(a.out).parent.mkdir(parents=True, exist_ok=True); Path(a.out).write_text(json.dumps(res, indent=2) + "\n")
++    print(json.dumps({k: v for k, v in res.items() if k != "results"}, indent=2))
++    for k, v in res["results"].items():
++        print(k, v.get("verdict", v["status"]), v.get("delta_logloss"), v.get("delta_95ci"), v.get("p_one_sided"))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_round11.py b/tests/test_round11.py
+new file mode 100644
+index 0000000..dee61e6
+--- /dev/null
++++ b/tests/test_round11.py
+@@ -0,0 +1,83 @@
++import math
++import random
++from datetime import date, timedelta
++
++import pytest
++
++from v13.matchup_features import build, parse_height
++from v13.provenance import UnverifiedOddsError, quarantine
++
++
++def test_parse_height():
++    assert parse_height("6-11") == 83 and parse_height(None) is None and parse_height("x") is None
++
++
++def league(seed=0, market_knows_size=False, effect=0.25, days=170):
++    """8 teams x 8 players; rebounds rise with height advantage over the opponent's size."""
++    rng = random.Random(seed)
++    teams = {t: [(t * 100 + k, rng.randint(74, 86), rng.uniform(0.15, 0.35)) for k in range(8)] for t in range(1, 9)}
++    size = {t: sum(h for _, h, _ in ps) / len(ps) for t, ps in teams.items()}
++    stats, games, props = [], [], []
++    gid = 0
++    for d in range(days):
++        day = (date(2025, 10, 22) + timedelta(days=d)).isoformat()
++        order = list(teams); rng.shuffle(order)
++        for i in range(0, 8, 2):
++            h, a = order[i], order[i + 1]; gid += 1
++            games.append({"id": gid, "date": day, "datetime": day + "T23:30:00Z", "season": 2025,
++                          "home_team": {"id": h}, "visitor_team": {"id": a}, "status": "Final", "postseason": False})
++            for team, opp in ((h, a), (a, h)):
++                for pid, hgt, rate in teams[team]:
++                    mins = 28.0
++                    mu = max(0.3, rate * mins + effect * (hgt - size[opp]))
++                    reb = sum(rng.random() < mu / 60 for _ in range(60))
++                    stats.append({"min": "28:00", "pts": 10, "reb": reb, "ast": 2, "fga": 10, "fgm": 4, "fg3a": 3,
++                                  "player": {"id": pid, "height": f"{hgt // 12}-{hgt % 12}", "draft_year": 2018},
++                                  "team": {"id": team}, "game": {"id": gid, "date": day}})
++                    fair_mu = rate * mins + (effect * (hgt - size[opp]) if market_knows_size else 0.0)
++                    line = math.floor(fair_mu) + 0.5
++                    # price the over from a Poisson(fair_mu) so the market is right about what it knows
++                    k = math.floor(line); cdf = sum(math.exp(-fair_mu) * fair_mu ** j / math.factorial(j) for j in range(k + 1))
++                    po = min(max(1 - cdf, 0.05), 0.95)
++                    to_am = lambda p: int(round(-100 * p / (1 - p))) if p >= 0.5 else int(round(100 * (1 - p) / p))
++                    props.append({"game_id": gid, "player_id": pid, "vendor": "draftkings", "prop_type": "rebounds",
++                                  "line_value": str(line), "opened_at": day + "T15:00:00Z",
++                                  "market": {"type": "over_under", "over_odds": to_am(po), "under_odds": to_am(1 - po)}})
++    gated, _, _ = quarantine(props, games, "bdl_opening_player_props")
++    return gated, stats, games, props
++
++
++def test_features_use_only_earlier_games():
++    _, stats, games, _ = league(1, days=30)
++    f1 = build(stats, games)
++    later = [dict(r) for r in stats]
++    last_day = max(r["game"]["date"] for r in later)
++    for r in later:
++        if r["game"]["date"] == last_day:
++            r["reb"] = 99
++    f2 = build(later, games)
++    for k, v in f1.items():
++        assert f2[k] == v  # changing the final day's results changes no feature
++
++
++def test_height_signal_found_when_price_ignores_it_and_not_when_priced():
++    from scripts.feature_info_test import run
++    gated, stats, games, _ = league(2, market_knows_size=False)
++    res = run(gated, stats, games)
++    assert res["results"]["rebounds|height_diff"]["verdict"] == "PASS"
++    gated2, stats2, games2, _ = league(3, market_knows_size=True)
++    res2 = run(gated2, stats2, games2)
++    assert res2["results"]["rebounds|height_diff"]["verdict"] == "FAIL"
++
++
++def test_info_test_refuses_ungated_props():
++    from scripts.feature_info_test import run
++    _, stats, games, raw = league(4, days=20)
++    with pytest.raises(UnverifiedOddsError):
++        run(raw, stats, games)
++
++
++def test_bh_controls_false_discoveries():
++    from scripts.feature_info_test import benjamini_hochberg
++    assert benjamini_hochberg([0.001, 0.2, 0.5, 0.04]) == [True, False, False, True]
++    assert benjamini_hochberg([0.03, 0.2, 0.5, 0.6]) == [False, False, False, False]
+diff --git a/v13/matchup_features.py b/v13/matchup_features.py
+new file mode 100644
+index 0000000..e5a762c
+--- /dev/null
++++ b/v13/matchup_features.py
+@@ -0,0 +1,123 @@
++"""Pregame player matchup features from box scores only (no new API calls).
++
++Every feature for a player-game uses only games dated strictly before it. Sources:
++  player object nested in /v1/stats rows: height ("6-11"), weight, position, draft_year
++  team-game aggregates built from the same box scores (FGA, FGM, FG3A, minutes).
++
++Features
++  height_in                 player height (inches)
++  opp_size_in               minutes-weighted height of the opponent's top-8 minute players over its last 10 games
++  height_diff               height_in - opp_size_in
++  opp_missed_fg             opponent missed field goals per game, last 10 (defensive-rebound chances)
++  own_missed_fg             own team missed field goals per game, last 10 (offensive-rebound chances)
++  opp_fg3a_rate             opponent 3PA / FGA, last 10 (long rebounds)
++  years_since_draft         season - draft_year (career-stage proxy; BALLDONTLIE has no birth date)
++  b2b                       player's previous game was the day before
++  h2h_resid_<stat>          shrunk mean of (actual - player's 10-game average) in earlier meetings with this
++                            opponent, all seasons supplied; shrinkage k = 5 games
++"""
++from collections import defaultdict, deque
++from datetime import date
++
++from scripts.regular_season_filter import minutes as parse_minutes
++
++H2H_K = 5.0
++STATS = {"points": "pts", "rebounds": "reb", "assists": "ast"}
++
++
++def parse_height(h):
++    try:
++        ft, inch = str(h).split("-")
++        return 12 * int(ft) + int(inch)
++    except (ValueError, AttributeError):
++        return None
++
++
++def _f(r, k):
++    try:
++        return float(r.get(k) or 0)
++    except (TypeError, ValueError):
++        return 0.0
++
++
++def build(stats, games):
++    """(game_id, player_id) -> feature dict, built strictly from earlier games."""
++    gmeta = {str(g["id"]): g for g in games}
++    rows = []
++    for r in stats:
++        g, pl, tm = r.get("game") or {}, r.get("player") or {}, r.get("team") or {}
++        if g.get("id") is None or pl.get("id") is None or tm.get("id") is None:
++            continue
++        gid = str(g["id"]); meta = gmeta.get(gid, {})
++        rows.append({"gid": gid, "date": str(g.get("date") or meta.get("date"))[:10], "season": meta.get("season", g.get("season")),
++                     "pid": str(pl["id"]), "tid": str(tm["id"]), "min": parse_minutes(r.get("min")), "row": r, "pl": pl})
++    rows.sort(key=lambda x: (x["date"], x["gid"]))
++    # opponent per (game, team)
++    teams_in_game = defaultdict(set)
++    for x in rows:
++        teams_in_game[x["gid"]].add(x["tid"])
++    opp = {(gid, t): next(iter(ts - {t}), None) for gid, ts in teams_in_game.items() for t in ts}
++
++    team_hist = defaultdict(lambda: deque(maxlen=10))     # tid -> recent team-game aggregates
++    player_hist = defaultdict(lambda: deque(maxlen=10))   # pid -> recent stat dicts
++    h2h = defaultdict(list)                               # (pid, opp_tid, stat) -> residuals
++    last_date = {}
++    out = {}
++    by_date = defaultdict(list)
++    for x in rows:
++        by_date[x["date"]].append(x)
++    for day in sorted(by_date):
++        today = by_date[day]
++        # 1) features from strictly earlier days
++        for x in today:
++            o = opp.get((x["gid"], x["tid"]))
++            th, oh = list(team_hist[x["tid"]]), list(team_hist[o]) if o else []
++            hgt = parse_height(x["pl"].get("height"))
++            feats = {"height_in": hgt, "years_since_draft": None, "b2b": None}
++            dy = x["pl"].get("draft_year")
++            if dy and x["season"]:
++                feats["years_since_draft"] = int(x["season"]) - int(dy)
++            if x["pid"] in last_date:
++                feats["b2b"] = int((date.fromisoformat(day) - date.fromisoformat(last_date[x["pid"]])).days == 1)
++            if len(oh) >= 5:
++                feats["opp_missed_fg"] = sum(t["fga"] - t["fgm"] for t in oh) / len(oh)
++                feats["opp_fg3a_rate"] = sum(t["fg3a"] for t in oh) / max(1.0, sum(t["fga"] for t in oh))
++                sz = [t["size"] for t in oh if t["size"] is not None]
++                feats["opp_size_in"] = sum(sz) / len(sz) if sz else None
++                if hgt is not None and feats["opp_size_in"] is not None:
++                    feats["height_diff"] = hgt - feats["opp_size_in"]
++            if len(th) >= 5:
++                feats["own_missed_fg"] = sum(t["fga"] - t["fgm"] for t in th) / len(th)
++            ph = list(player_hist[x["pid"]])
++            for name, key in STATS.items():
++                res = h2h.get((x["pid"], o, name), [])
++                feats[f"h2h_resid_{name}"] = sum(res) / (len(res) + H2H_K) if o else None
++                feats[f"avg10_{name}"] = sum(p[key] for p in ph) / len(ph) if ph else None
++            out[(x["gid"], x["pid"])] = feats
++        # 2) then update histories with today's results
++        agg = defaultdict(lambda: {"fga": 0.0, "fgm": 0.0, "fg3a": 0.0, "players": []})
++        for x in today:
++            a = agg[(x["gid"], x["tid"])]
++            for k in ("fga", "fgm", "fg3a"):
++                a[k] += _f(x["row"], k)
++            a["players"].append((x["min"], parse_height(x["pl"].get("height"))))
++        for (gid, tid), a in agg.items():
++            top = sorted((p for p in a["players"] if p[1] is not None), reverse=True)[:8]
++            mins = sum(m for m, _ in top)
++            a["size"] = sum(m * h for m, h in top) / mins if mins else None
++            team_hist[tid].append(a)
++        for x in today:
++            o = opp.get((x["gid"], x["tid"]))
++            ph = list(player_hist[x["pid"]])
++            vals = {k: _f(x["row"], k) for k in STATS.values()}
++            if len(ph) >= 5 and o:
++                for name, key in STATS.items():
++                    h2h[(x["pid"], o, name)].append(vals[key] - sum(p[key] for p in ph) / len(ph))
++            player_hist[x["pid"]].append(vals)
++            last_date[x["pid"]] = day
++    for f in out.values():
++        if f.get("height_diff") is not None and f.get("opp_missed_fg") is not None:
++            f["height_x_oppmiss"] = f["height_diff"] * f["opp_missed_fg"]
++        if f.get("years_since_draft") is not None and f.get("b2b") is not None:
++            f["yrs_x_b2b"] = f["years_since_draft"] * f["b2b"]
++    return out
+-- 
+2.43.0
+
