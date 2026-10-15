@@ -1,8 +1,8 @@
 name: V13 Live odds logger (closing lines and CLV)
 on:
   schedule:
-    - cron: '7 14-16 * * *'
-    - cron: '*/15 17-23 * * *'
+    - cron: '7 14-16 * * *'        # hourly in the morning (lines opening)
+    - cron: '*/15 17-23 * * *'     # every 15 min from ~1pm ET: injury-report and tip windows
     - cron: '*/15 0-4 * * *'
   workflow_dispatch:
 permissions:
@@ -23,13 +23,16 @@ jobs:
       - id: log
         env:
           BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
-        run: python -u -m scripts.log_live_odds --out-dir research_data/live_odds
-      - name: Upload snapshot to weekly release (append-only)
-        if: steps.log.outputs.rows != '0'
+        run: python -u -m scripts.log_live_odds --out-dir research_data/live_odds --max-requests 80 --props-window-hours 14
+      - name: Upload run files to the weekly release (append-only; existing names are never overwritten)
+        if: always() && steps.log.outputs.dir != '' && steps.log.outputs.rows != '0'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="live-odds-${{ steps.log.outputs.week }}"
-          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "Append-only BALLDONTLIE odds snapshots" --prerelease
-          gzip -9 "${{ steps.log.outputs.file }}"
-          gh release upload "$TAG" "${{ steps.log.outputs.file }}.gz"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "Append-only BALLDONTLIE odds observations (logger v2)" --prerelease
+          cd "${{ steps.log.outputs.dir }}"
+          for f in observations.jsonl raw_responses.jsonl manifest.json; do
+            gzip -9 -c "$f" > "${{ steps.log.outputs.stem }}_$f.gz"
+            gh release upload "$TAG" "${{ steps.log.outputs.stem }}_$f.gz"
+          done
