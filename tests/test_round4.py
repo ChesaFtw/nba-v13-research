@@ -52,26 +52,11 @@ def test_consistency_no_edge_when_props_are_right():
 
 
 def test_live_logger_stamps_rows():
-    class Resp:
-        status_code = 200
-        def __init__(self, payload): self.payload = payload
-        def json(self): return self.payload
-        def raise_for_status(self): pass
-    class Session:
-        def get(self, url, params=None, headers=None, timeout=None):
-            if url.endswith("/v1/games"):
-                return Resp({"data": [{"id": 5, "status_state": "scheduled", "datetime": "2026-10-21T23:30:00Z"}], "meta": {}})
-            if url.endswith("/nba/v2/odds"):
-                return Resp({"data": [{"game_id": 5, "vendor": "dk", "total_value": "221.5"}], "meta": {}})
-            return Resp({"data": [{"game_id": 5, "player_id": 9, "prop_type": "points"}]})
-    original = logger.requests.Session
-    logger.requests.Session = Session
-    try:
-        rows, n = logger.snapshot("k")
-    finally:
-        logger.requests.Session = original
-    assert n == 1 and len(rows) == 2
-    assert all(r["retrieved_at_utc"] and r["tip_utc"] == "2026-10-21T23:30:00Z" for r in rows)
+    from datetime import datetime, timezone
+    from scripts.acceptance_round9 import _Session
+    obs, raw, manifest = logger.snapshot("k", now=datetime(2026, 10, 28, 18, tzinfo=timezone.utc), session=_Session(), commit="c")
+    assert manifest["upcoming_games"] == 1 and len(obs) == 6
+    assert all(o["captured_at_utc"] and o["tip_utc"] == "2026-10-28T23:30:00+00:00" for o in obs)
 
 
 def test_power_devig_and_prereg_runner():

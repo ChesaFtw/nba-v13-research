@@ -169,13 +169,20 @@ def main():
     p.add_argument("--stats", action="append", required=True)
     p.add_argument("--odds", action="append", required=True)
     p.add_argument("--out-candidates", required=True); p.add_argument("--out-report", required=True)
+    p.add_argument("--validated", action="store_true", help="require provenance-gate stamped odds (fail closed)")
     a = p.parse_args()
     games = [g for path in a.games for g in read(path) if g.get("postseason") is False]
     stats = [s for path in a.stats for s in read(path)]
     odds = [o for path in a.odds for o in read(path)]
+    from v13.provenance import evidence_class, require_eligible
+    if a.validated:
+        require_eligible(odds, "game model")
     rows, coverage = build_rows(games, stats, odds)
     cands, report = run(rows)
     report["coverage"] = dict(coverage); report["rows"] = len(rows)
+    report["evidence_class"] = evidence_class(a.validated)
+    for c in cands:
+        c["evidence_class"] = report["evidence_class"]
     report["rows_by_season"] = dict(Counter(str(r.get("season")) for r in rows))
     report["candidates_by_season"] = dict(Counter(str(c.get("season")) for c in cands))
     report["games_by_season"] = dict(Counter(str(g.get("season")) for g in games))

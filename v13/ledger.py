@@ -74,6 +74,11 @@ def append_prediction(path, pred, kind="shadow", now=None):
         raise ValueError("prediction must be timestamped before tip")
     if stamped > now:
         raise ValueError("prediction timestamp is in the future")
+    if not now < tip:
+        raise ValueError("retroactive entry: the record is being written at/after tip, so it cannot join the "
+                         "prospective record even if predicted_at_utc is earlier")
+    if str(pred.get("source", "")).lower().startswith(("backtest", "historical", "exploratory")):
+        raise ValueError("backtest/exploratory output can never be written to a prospective ledger")
     has_actual = any(pred.get(k) is not None for k in ACTUAL_ONLY)
     if kind == "shadow" and has_actual:
         raise ValueError("shadow ledger cannot carry bet confirmation fields")
@@ -113,6 +118,20 @@ def append_settlement(path, pid, outcome, settled_at_utc, source):
                           "settled_at_utc": settled_at_utc, "source": source, "ledger_kind": pred["ledger_kind"]})
 
 
+def ledger_bets(path):
+    """Join predictions to settlements (verified chain) for tier validation."""
+    recs = read(path); verify(path)
+    sett = {r["prediction_id"]: r for r in recs if r["record"] == "settlement"}
+    out = []
+    for p in (r for r in recs if r["record"] == "prediction"):
+        s = sett.get(p["prediction_id"])
+        if s:
+            price = p["confirmed_price"] if p["ledger_kind"] == "actual" else p["price"]
+            out.append({"tier": p["tier"], "price": price, "outcome": s["outcome"], "p_market": p["p_market"],
+                        "date": p["predicted_at_utc"][:10], "game_id": p["game_id"]})
+    return out
+
+
 def report(path):
     """Summary that labels itself with the ledger kind; shadow results are never called profit."""
     recs = read(path); verify(path)
@@ -126,9 +145,12 @@ def report(path):
         p = preds.get(c["prediction_id"])
         if p and c.get("close_opp_price") is not None and float(c["close_line"]) == float(p["line"]):
             clv.append(no_vig_pair(c["close_price"], c["close_opp_price"])[0] - no_vig_pair(p["price"], p["opp_price"])[0])
-    label = "SHADOW (not wagered; hypothetical)" if kinds == {"shadow"} else ("ACTUAL" if kinds == {"actual"} else "MIXED-INVALID")
+    if len(kinds) > 1:
+        raise ValueError("ledger mixes shadow and actual records; refusing to report")
+    label = "SHADOW (not wagered; hypothetical)" if kinds == {"shadow"} else ("ACTUAL" if kinds == {"actual"} else "EMPTY")
     return {"ledger": label, "predictions": len(preds), "settled": len(sett), "wins": w, "losses": len(decided) - w,
             "flat_units_per_bet": round(sum(s["units_per_unit_staked"] for s in decided) / len(decided), 4) if decided else None,
             "by_tier": {t: sum(1 for p in preds.values() if p["tier"] == t) for t in TIERS},
+            "tier_validation": __import__("v13.tier_validation", fromlist=["validate_tiers"]).validate_tiers(ledger_bets(path)),
             "clv_same_line": {"n": len(clv), "mean_prob_pts": round(100 * sum(clv) / len(clv), 3) if clv else None,
                               "note": "positive = the closing price implied a higher win chance than the price we logged"}}

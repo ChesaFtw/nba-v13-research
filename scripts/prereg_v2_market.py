@@ -38,8 +38,8 @@ def grade(ledger):
     return out
 
 
-def run(features, lines, games, market, selector):
-    rep = evaluate(features, lines, games, "actual")
+def run(features, lines, games, market, selector, validated=False):
+    rep = evaluate(features, lines, games, "actual", validated=validated)
     m = rep["markets"].get(market) or {}
     if m.get("status") != "evaluated" or not isinstance(m.get(selector), dict) or "holdout_ledger" not in m[selector]:
         return {"verdict": "UNTESTABLE", "reason": f"pipeline did not evaluate {market}/{selector}", "detail": m,
@@ -58,7 +58,7 @@ def run(features, lines, games, market, selector):
         "z_ge_2_power": ((primary.get("power") or {}).get("z") or -9) >= RULE["min_z"],
     }
     verdict = "UNTESTABLE" if priced_share < RULE["min_priced_share"] else ("PASS" if all(checks.values()) else "FAIL")
-    return {"verdict": verdict, "market": market, "selector": selector, "rule": RULE, "checks": checks,
+    return {"verdict": verdict, "evidence_class": rep["evidence_class"], "market": market, "selector": selector, "rule": RULE, "checks": checks,
             "frozen_threshold": m[selector]["threshold"], "holdout_start": rep.get("holdout_start"),
             "priced_share": round(priced_share, 4), "lines_dropped_not_pregame": dropped, "coverage": cov,
             "primary": primary,

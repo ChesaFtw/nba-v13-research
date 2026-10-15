@@ -234,12 +234,20 @@ def evaluate_market(train, test, market, pricing):
     return out
 
 
-def evaluate(features, lines, games, pricing="actual", prior=None):
+def evaluate(features, lines, games, pricing="actual", prior=None, validated=False):
+    """validated=True: every line must carry a passing provenance-gate stamp (scripts/quarantine_odds.py),
+    else UnverifiedOddsError. The report's evidence_class says which kind of result this is."""
+    from v13.provenance import evidence_class, require_eligible
+    if validated:
+        require_eligible(lines, "prop backtest")
+        if prior:
+            require_eligible(prior["lines"], "prop backtest (prior season)")
     if not tip_times(games):
         raise RuntimeError("No tip times in games index; cannot verify pregame lines")
     coverage = Counter()
     rows = dataset(features, lines, tip_times(games), coverage)
-    report = {"pricing": pricing, "line_rule": "vendor priority, earliest row with opened_at < tip",
+    report = {"evidence_class": evidence_class(validated), "pricing": pricing,
+              "line_rule": "vendor priority, earliest row with opened_at < tip",
               "coverage": dict(coverage), "matched_rows": len(rows), "markets": {}}
     if prior:
         prior_cov = Counter()
@@ -269,13 +277,14 @@ def main():
     p.add_argument("--games", required=True); p.add_argument("--out", required=True)
     p.add_argument("--pricing", choices=("actual", "assumed110"), default="actual")
     p.add_argument("--prior-features"); p.add_argument("--prior-lines"); p.add_argument("--prior-games")
+    p.add_argument("--validated", action="store_true", help="require provenance-gate stamped lines (fail closed)")
     a = p.parse_args()
     prior = None
     if a.prior_features or a.prior_lines or a.prior_games:
         if not (a.prior_features and a.prior_lines and a.prior_games):
             raise SystemExit("Cross-season mode needs --prior-features, --prior-lines and --prior-games")
         prior = {"features": read(a.prior_features), "lines": read(a.prior_lines), "games": read(a.prior_games)}
-    result = evaluate(read(a.features), read(a.lines), read(a.games), a.pricing, prior)
+    result = evaluate(read(a.features), read(a.lines), read(a.games), a.pricing, prior, validated=a.validated)
     out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=2) + "\n")
     brief = {k: v for k, v in result.items() if k != "markets"}

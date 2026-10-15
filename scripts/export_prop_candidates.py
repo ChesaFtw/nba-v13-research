@@ -40,9 +40,12 @@ def probability(proj, line, market, sigma):
     return over, push
 
 
-def export(seasons):
+def export(seasons, validated=False):
+    from v13.provenance import evidence_class, require_eligible
     rows, coverage = [], Counter()
     for s in seasons:
+        if validated:
+            require_eligible(s["lines"], f"prop candidates season {s['season']}")
         cov = Counter()
         for r in dataset(s["features"], s["lines"], tip_times(s["games"]), cov):
             if r["over_odds"] is None or r["under_odds"] is None:
@@ -74,7 +77,8 @@ def export(seasons):
                                 "line": r["line"], "price": price, "opp_price": opp,
                                 "p_model": min(max(p_side / no_push, 1e-4), 1 - 1e-4), "p_push": push,
                                 "projection": round(proj, 3), "model_version": "ridge_rolling_poisson_v1",
-                                "vendor": r["vendor"], "opened_at": r["opened_at"], "outcome": outcome})
+                                "vendor": r["vendor"], "opened_at": r["opened_at"], "outcome": outcome,
+                                "evidence_class": evidence_class(validated)})
     return out, dict(coverage)
 
 
@@ -85,12 +89,13 @@ def main():
     p.add_argument("--lines", action="append", required=True)
     p.add_argument("--games", action="append", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--validated", action="store_true", help="require provenance-gate stamped lines (fail closed)")
     a = p.parse_args()
     if not len(a.season) == len(a.features) == len(a.lines) == len(a.games):
         raise SystemExit("Give --season/--features/--lines/--games once per season, in the same order")
     seasons = [{"season": s, "features": read(f), "lines": read(l), "games": read(g)}
                for s, f, l, g in zip(a.season, a.features, a.lines, a.games)]
-    cands, coverage = export(seasons)
+    cands, coverage = export(seasons, validated=a.validated)
     out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("".join(json.dumps(c) + "\n" for c in cands))
     print(json.dumps({"candidates": len(cands), "by_market": Counter(c["market"] for c in cands), "coverage": coverage}, indent=2))

@@ -128,7 +128,10 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
     if split_date:
         days = lambda rows: len({c["date"] for c in rows})
         scale = days(val) / max(days(test), 1)
-    report = {"grouping": grouping, "validation_season": validation_season, "test_season": test_season, "split_date": split_date,
+    classes = {c.get("evidence_class", "exploratory_unverified_prices") for c in candidates}
+    report = {"evidence_class": "validated" if classes == {"validated"} else "exploratory_unverified_prices",
+              "candidate_evidence_classes": sorted(classes),
+              "grouping": grouping, "validation_season": validation_season, "test_season": test_season, "split_date": split_date,
               "validation_to_test_day_ratio": round(scale, 3),
               "scored_candidates": dict(Counter(c["market"] for c in scored)),
               "calibration_fits_last_period": fits[max(fits)],
@@ -147,6 +150,7 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
             "test": {**{f"{st}": {k: v for k, v in r.items() if k != "ledger"} for st, r in sims.items()},
                      **{f"monte_carlo_{st}": monte_carlo(r["ledger"], st, mc_paths) for st, r in sims.items()}},
             "actionable_qualified_in_test": len(chosen),
+            "tier_validation": __import__("v13.tier_validation", fromlist=["validate_tiers"]).validate_tiers(chosen),
             "shortfall_vs_target": max(0, n - len(chosen)),
             "game_cluster_roi_ci": game_cluster_bootstrap_roi(chosen),
             "selected_bets_calibration_test": selection_calibration(chosen),
