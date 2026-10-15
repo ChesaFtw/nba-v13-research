@@ -5,6 +5,7 @@ target_date (YYYY-MM-DD), tipoff_at, predicted_at, trained_through.
 This checks stated timestamps, not external authenticity. Not a betting model.
 """
 from datetime import date, datetime, timezone
+from research.nba_calendar_date import game_date_eastern
 from research.paired_market_audit import paired_mae
 
 DEFAULT_WINDOWS = (
@@ -48,8 +49,8 @@ def audit_disjoint_windows(rows, windows=DEFAULT_WINDOWS, *, iterations=2000):
         predicted = _utc(row["predicted_at"])
         if predicted >= tip:
             raise ValueError("prediction not before tipoff")
-        if target != tip.date():
-            raise ValueError("target_date differs from UTC tipoff date")
+        if row['target_date'] != game_date_eastern(row['tipoff_at']):
+            raise ValueError("target_date differs from NBA Eastern game date")
         for start, end in windows:
             if start <= row["target_date"] < end:
                 bins[start].append(row)
