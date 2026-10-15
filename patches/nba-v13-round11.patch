@@ -175,7 +175,7 @@ index 0000000..6b1054e
 +    return out, skipped
 +
 +
-+def test_feature(rows, feature, split=SPLIT_DATE, seed=11):
++def evaluate_feature(rows, feature, split=SPLIT_DATE, seed=11):
 +    rows = [r for r in rows if r["f"].get(feature) is not None]
 +    tr = [r for r in rows if r["date"] < split]; te = [r for r in rows if r["date"] >= split]
 +    if len(tr) < 500 or len(te) < 300:
@@ -231,7 +231,7 @@ index 0000000..6b1054e
 +    for m, fs in REGISTRY.items():
 +        mr = [r for r in rows if r["market"] == m]
 +        for f in fs:
-+            res = test_feature(mr, f)
++            res = evaluate_feature(mr, f)
 +            results[f"{m}|{f}"] = res
 +            if res["status"] == "tested":
 +                keys.append(f"{m}|{f}"); pv.append(res["p_one_sided"])
