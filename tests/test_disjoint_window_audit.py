@@ -35,3 +35,23 @@ def test_duplicate_record_rejected():
 def test_fewer_than_five_games_rejected():
     with pytest.raises(ValueError,match="five"):
         audit_disjoint_windows([row(i) for i in range(4)],iterations=200)
+
+
+def test_after_utc_midnight_uses_eastern_game_date():
+    rows=[row(i) for i in range(6)]
+    for r in rows:
+        r["tipoff_at"]="2026-01-21T02:00:00Z"
+        r["predicted_at"]="2026-01-20T23:00:00Z"
+    assert audit_disjoint_windows(rows,[("2026-01-15","2026-01-22")],iterations=200)["evaluated_rows"]==6
+
+def test_after_utc_midnight_wrong_target_rejected():
+    r=row(1);r["tipoff_at"]="2026-01-21T02:00:00Z";r["target_date"]="2026-01-21"
+    with pytest.raises(ValueError,match="Eastern"):
+        audit_disjoint_windows([r])
+
+def test_dst_transition_uses_eastern_date():
+    rows=[row(i,"2026-03-08") for i in range(6)]
+    for r in rows:
+        r["tipoff_at"]="2026-03-09T02:30:00Z"
+        r["predicted_at"]="2026-03-08T23:00:00Z"
+    assert audit_disjoint_windows(rows,[("2026-03-08","2026-03-10")],iterations=200)["evaluated_rows"]==6
