@@ -61,16 +61,30 @@ class PoissonGLM:
         b = np.zeros(Z.shape[1])
         b[0] = math.log(max(y.mean(), 1e-6) / max(np.exp(lo).mean(), 1e-6))
         pen = np.eye(Z.shape[1]) * self.ridge; pen[0, 0] = 0
+        self.converged_ = False
         for _ in range(self.iters):
             eta = np.clip(lo + Z @ b, -20, 20); m = np.exp(eta)
             g = Z.T @ (y - m) - pen @ b
-            H = Z.T @ (Z * m[:, None]) + pen
-            step = np.linalg.solve(H, g); b += step
-            if np.max(np.abs(step)) < 1e-8:
+            H = Z.T @ (Z * m[:, None]) + pen + np.eye(Z.shape[1]) * 1e-8
+            try:
+                step = np.linalg.solve(H, g)
+            except np.linalg.LinAlgError:
+                step = np.linalg.lstsq(H, g, rcond=None)[0]
+            if not np.all(np.isfinite(step)):
+                break
+            mx = np.max(np.abs(step))
+            if mx > 2.0:               # damped Newton: never jump more than 2 log-units per iteration
+                step *= 2.0 / mx
+            b = b + step
+            if mx < 1e-8:
+                self.converged_ = True
                 break
         self.beta_ = b
-        H = Z.T @ (Z * np.exp(np.clip(lo + Z @ b, -20, 20))[:, None]) + pen
-        self.se_ = np.sqrt(np.clip(np.diag(np.linalg.inv(H)), 0, None))
+        H = Z.T @ (Z * np.exp(np.clip(lo + Z @ b, -20, 20))[:, None]) + pen + np.eye(Z.shape[1]) * 1e-8
+        try:
+            self.se_ = np.sqrt(np.clip(np.diag(np.linalg.inv(H)), 0, None))
+        except np.linalg.LinAlgError:
+            self.se_ = np.full(Z.shape[1], np.nan)
         return self
 
     def predict(self, X, offset):
