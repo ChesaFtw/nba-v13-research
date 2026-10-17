@@ -1,0 +1,37 @@
+name: V13 Odds-timestamp forensics (2023-24, 2024-25, 2025-26)
+on:
+  workflow_dispatch:
+  push:
+    paths: ['experiments/odds-forensics.trigger']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  forensics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SEASON_RUN: '38642028905'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Game indexes (tip times) from saved season artifacts
+        run: for s in 2023 2024 2025; do gh run download "$SEASON_RUN" -n v13-r3-season-$s -D research_data; done
+      - name: Sample 30 games per season; pull opening + current odds; classify every timestamp
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: |
+          python -u -m scripts.odds_forensics \
+            $(for s in 2023 2024 2025; do echo --season $s --games research_data/game_history/games_$s.jsonl; done) \
+            --per-season 30 --documented-seasons 2025,2026 --out research_results/forensics
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-odds-forensics
+          path: research_results/forensics/
+          retention-days: 90

@@ -1,0 +1,46 @@
+name: Apply committed patch series
+on:
+  push:
+    paths: ['patches/*.patch']
+permissions:
+  contents: write
+concurrency:
+  group: apply-patch-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply every patch not yet recorded in patches/APPLIED.txt (preserves each commit)
+        run: |
+          git config user.name "patch-bot"
+          git config user.email "patch-bot@users.noreply.github.com"
+          touch patches/APPLIED.txt
+          applied=0
+          for p in $(ls patches/*.patch | sort); do
+            sum=$(sha256sum "$p" | cut -d' ' -f1)
+            if grep -q "$sum" patches/APPLIED.txt; then echo "already applied: $p"; continue; fi
+            git am -3 --committer-date-is-author-date "$p" || { git am --abort; echo "::error::git am failed for $p"; exit 1; }
+            echo "$sum  $(basename "$p")  $(date -u +%FT%TZ)" >> patches/APPLIED.txt
+            applied=$((applied+1))
+          done
+          echo "APPLIED=$applied" >> "$GITHUB_ENV"
+      - name: Full test suite must pass before anything is pushed
+        if: env.APPLIED != '0'
+        run: |
+          pip install -r requirements.txt scikit-learn
+          python -m pytest -q
+      - name: Record and push (GITHUB_TOKEN pushes do not re-trigger workflows)
+        if: env.APPLIED != '0'
+        run: |
+          git add patches/APPLIED.txt
+          git commit -m "Record applied patch series in patches/APPLIED.txt"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git log --oneline -8

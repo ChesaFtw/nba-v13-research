@@ -1,0 +1,107 @@
+name: V13 Experiments B C D — game model v2, cross-market ranking, consistency
+on:
+  workflow_dispatch:
+  push:
+    paths: ['experiments/BCD.trigger']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  season-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        season: [2023, 2024, 2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Games, player box scores, regular-season filter, opening game odds
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: |
+          S=${{ matrix.season }}
+          python -u -m scripts.backfill_games --season $S
+          python -u -m scripts.backfill_player_stats --season $S --max-pages 600 --out research_data/player_history/$S
+          python -u -m scripts.regular_season_filter --season $S --games research_data/game_history/games_$S.jsonl \
+            --stats research_data/player_history/$S/player_stats_$S.jsonl --out research_data/regular_player_history
+          python -u -m scripts.collect_opening_game_odds --games research_data/game_history/games_$S.jsonl \
+            --out research_data/game_odds/opening_$S.jsonl
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v13-r3-season-${{ matrix.season }}
+          path: |
+            research_data/game_history/games_${{ matrix.season }}.jsonl
+            research_data/regular_player_history/
+            research_data/game_odds/
+          retention-days: 90
+
+  models:
+    needs: season-data
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt scikit-learn
+      - run: python -m pytest -q
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: v13-r3-season-*
+          merge-multiple: true
+          path: research_data
+      - name: Game model v2 (walk-forward, 2023-24 burn-in)
+        run: |
+          python -u -m scripts.game_model_v2 \
+            $(for s in 2023 2024 2025; do echo --games research_data/game_history/games_$s.jsonl \
+              --stats research_data/regular_player_history/player_stats_regular_$s.jsonl \
+              --odds research_data/game_odds/opening_$s.jsonl; done) \
+            --out-candidates research_results/r3/candidates_games.jsonl --out-report research_results/r3/game_model_v2.json
+      - name: Prop candidates for 2025-26 (all markets with lines)
+        run: |
+          RUN=$(gh run list --workflow full-historical-prop-lines.yml --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          gh run download "$RUN" -n v13-full-opening-props-2025 -D research_results/prop_openings_full
+          python -u -m scripts.build_prop_research --season 2025 \
+            --input research_data/regular_player_history/player_stats_regular_2025.jsonl
+          python -u -m scripts.export_prop_candidates --season 2025 \
+            --features research_data/prop_research/props_2025.jsonl \
+            --lines research_results/prop_openings_full/opening_props_2025.jsonl \
+            --games research_data/game_history/games_2025.jsonl \
+            --out research_results/r3/candidates_props_2025.jsonl
+      - name: "Experiment C: games only, validate 2024-25, test 2025-26 (residual vs direct)"
+        run: |
+          for m in residual_v2 direct_v2; do
+            python -u -m scripts.rank_and_stake --candidates research_results/r3/candidates_games.jsonl --models $m \
+              --validation-season 2024 --test-season 2025 --out research_results/r3/rank_games_$m.json
+          done
+      - name: "Experiment B: props + games within 2025-26, per-market vs pooled calibration (exploratory split 2026-02-01)"
+        run: |
+          for g in market pooled; do
+            python -u -m scripts.rank_and_stake --candidates research_results/r3/candidates_games.jsonl \
+              --candidates research_results/r3/candidates_props_2025.jsonl --models residual_v2,ridge_rolling_poisson_v1 \
+              --test-season 2025 --split-date 2026-02-01 --grouping $g --out research_results/r3/rank_all_2025_split_$g.json
+          done
+      - name: "Experiment D: cross-market consistency (2025-26, exploratory)"
+        run: |
+          python -u -m scripts.cross_market_consistency --games research_data/game_history/games_2025.jsonl \
+            --game-odds research_data/game_odds/opening_2025.jsonl \
+            --props research_results/prop_openings_full/opening_props_2025.jsonl \
+            --stats research_data/regular_player_history/player_stats_regular_2025.jsonl \
+            --out research_results/r3/consistency_2025.json
+      - name: "Bankroll feasibility (simulation only)"
+        run: python -u -m scripts.bankroll_feasibility --out research_results/r3/feasibility.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-r3-results
+          path: research_results/r3/
+          retention-days: 90
