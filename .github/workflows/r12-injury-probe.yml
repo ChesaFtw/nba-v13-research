@@ -1,0 +1,25 @@
+name: V13 R12 — official injury report feasibility probe
+on:
+  workflow_dispatch:
+  push:
+    paths: ['experiments/r12-injury-probe.trigger']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt pypdf
+      - name: Probe (read-only; about 20 downloads)
+        run: python -u -m scripts.injury_report_probe --out research_results/r12_injury_probe --sample 20
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-r12-injury-probe
+          path: research_results/r12_injury_probe/
+          retention-days: 90

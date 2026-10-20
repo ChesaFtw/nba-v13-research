@@ -1,0 +1,43 @@
+name: V13 Experiment A — pre-registered 2024-25 threes unders
+on:
+  workflow_dispatch:
+  push:
+    paths: ['experiments/A.trigger']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  experiment-a:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LINES_RUN: '38614396898'
+      FEATURES_RUN: '38614413903'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt scikit-learn
+      - run: python -m pytest -q
+      - name: Download frozen 2024-25 inputs
+        run: |
+          gh run download "$LINES_RUN" -n v13-full-2024-threes-lines -D in/lines
+          gh run download "$FEATURES_RUN" -n v13-2024-player-prop-features -D in/features
+          find in -type f | sort
+          sha256sum $(find in -type f -name '*.jsonl') | tee research_input_sha256.txt
+      - name: Run frozen replication (selection = legacy pipeline; grading = actual prices, pre-tip, both de-vigs)
+        run: |
+          python -u -m scripts.prereg_threes_unders_2024 \
+            --features "$(find in/features -name props_2024.jsonl | head -1)" \
+            --lines "$(find in/lines -name opening_threes.jsonl | head -1)" \
+            --games "$(find in/lines -name games.jsonl | head -1)" \
+            --out research_results/prereg/threes_unders_2024.json
+          cp research_input_sha256.txt research_results/prereg/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-prereg-threes-unders-2024
+          path: research_results/prereg/
+          retention-days: 90
