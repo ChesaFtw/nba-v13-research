@@ -83,7 +83,7 @@ def build_prior_only(games):
 
 
 def main():
-    games = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(ROOT.glob("*/002*.json"))]
+    games = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(ROOT.glob("*/[0-9]*.json"))]
     if not games:
         raise ValueError("No ingested final games yet; cannot create research features")
     result = build_prior_only(games)
