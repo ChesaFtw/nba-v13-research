@@ -29,6 +29,8 @@ jobs:
               except Exception as e: print(name,str(e)[:180],flush=True)
               return {}
           probe('nba_schedule','https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json')
+          roster=probe('espn_wizards_roster','https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/27/roster')
+          print('ESPN ROSTER structure',list(roster),'first',str(roster.get('athletes',[{}])[0])[:2200],flush=True)
           j=probe('espn_scoreboard','https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=20261021')
           events=j.get('events',[])
           print('ESPN events',len(events),'first',[(x.get('id'),x.get('shortName')) for x in events[:5]],flush=True)
