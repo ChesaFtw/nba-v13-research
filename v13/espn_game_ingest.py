@@ -156,6 +156,10 @@ def _players(section: dict):
                 made, attempted = _split_pair(vals[source]) if vals.get(source) else (0, 0)
                 obj[targets[0]] = made
                 obj[targets[1]] = attempted
+            obj["reboundsTotal"] = obj["rebounds"]
+            obj["reboundsOffensive"] = obj["offensiveRebounds"]
+            obj["reboundsDefensive"] = obj["defensiveRebounds"]
+            obj["plusMinusPoints"] = obj["plusMinus"]
             # Preserve ESPN IDs: these are not interchangeable with NBA person IDs.
             out.append(obj)
     return out
