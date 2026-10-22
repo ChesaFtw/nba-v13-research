@@ -1,0 +1,45 @@
+name: V13 source connectivity probe
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/nba-source-probe.yml']
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install requests
+      - name: Probe NBA, ESPN, BDL (without credentials in output)
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os, requests
+          def probe(name,url,headers=None):
+              try:
+                  r=requests.get(url,headers=headers,timeout=20)
+                  print(name,r.status_code,len(r.content),r.headers.get('Content-Type'),flush=True)
+                  if r.status_code==200 and 'json' in r.headers.get('content-type',''):
+                      return r.json()
+              except Exception as e: print(name,str(e)[:180],flush=True)
+              return {}
+          probe('nba_schedule','https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json')
+          j=probe('espn_scoreboard','https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=20261021')
+          events=j.get('events',[])
+          print('ESPN events',len(events),'first',[(x.get('id'),x.get('shortName')) for x in events[:5]],flush=True)
+          target=next((x for x in events if 'MIL' in x.get('shortName','') and 'WSH' in x.get('shortName','')),{})
+          if target:
+              id=target['id']
+              s=probe('espn_summary','https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event='+id)
+              print('ESPN summary keys',list(s),'plays',len(s.get('plays',[])),'boxscore?',list(s.get('boxscore',{})),flush=True)
+          key=os.getenv('BALLDONTLIE_API_KEY')
+          if key:
+              b=probe('bdl_games','https://api.balldontlie.io/v1/games?dates[]=2026-10-21&per_page=2',{'Authorization':key})
+              print('BDL rows',len(b.get('data',[])),flush=True)
+          else: print('BALLDONTLIE_API_KEY missing',flush=True)
+          PY
