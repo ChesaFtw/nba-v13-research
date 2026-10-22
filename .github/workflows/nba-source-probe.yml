@@ -37,6 +37,11 @@ jobs:
               id=target['id']
               s=probe('espn_summary','https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event='+id)
               print('ESPN summary keys',list(s),'plays',len(s.get('plays',[])),'boxscore?',list(s.get('boxscore',{})),flush=True)
+              print('ESPN HEADER competitions',str(s.get('header',{}).get('competitions',[{}])[0])[:2600],flush=True)
+              print('ESPN TEAM box',str(s.get('boxscore',{}).get('teams',[{}])[0])[:2400],flush=True)
+              print('ESPN PLAYER box',str(s.get('boxscore',{}).get('players',[{}])[0])[:3200],flush=True)
+              print('ESPN FIRST play',str(s.get('plays',[{}])[0])[:1200],flush=True)
+              print('ESPN LAST play',str(s.get('plays',[{}])[-1])[:1200],flush=True)
           key=os.getenv('BALLDONTLIE_API_KEY')
           if key:
               b=probe('bdl_games','https://api.balldontlie.io/v1/games?dates[]=2026-10-21&per_page=2',{'Authorization':key})
