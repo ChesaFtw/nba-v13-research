@@ -1,0 +1,50 @@
+name: V13 full-game NBA archive
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'v13/nba_live_ingest.py'
+      - 'scripts/collect_nba_full_games.py'
+      - 'scripts/build_prior_only_game_features.py'
+      - '.github/workflows/live-game-archive.yml'
+      - 'tests/test_nba_live_ingest.py'
+  schedule:
+    - cron: '20 10 * * *'
+    - cron: '10 15 * * *'
+permissions:
+  contents: write
+concurrency:
+  group: v13-live-game-archive-main
+  cancel-in-progress: false
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt
+      - name: Run ingestion safety tests
+        run: python -m pytest -q tests/test_nba_live_ingest.py
+      - name: Collect NBA box scores and complete play-by-play for last four local dates
+        run: python -m scripts.collect_nba_full_games --days-back 3
+      - name: Generate chronological prior-game features
+        run: python -m scripts.build_prior_only_game_features
+      - name: Commit newly settled game data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add research_data/live_nba research_data/derived_prior_game
+          if git diff --cached --quiet; then
+            echo "No new completed games or changes."
+          else
+            git commit -m "Archive finished NBA games, player stats and PBP with prior-only features"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
