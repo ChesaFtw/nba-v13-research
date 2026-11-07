@@ -1,0 +1,306 @@
+From c36cd3821b2fbbc0f06c5e3aaffeed6581604320 Mon Sep 17 00:00:00 2001
+From: Claude audit <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 20:10:04 -0500
+Subject: [PATCH] Round 10: H1 blowout-minutes pre-registration and frozen test
+ (gated inputs only), tests
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ PREREG_H1_BLOWOUT_MINUTES.md  |  35 +++++++
+ scripts/h1_blowout_minutes.py | 168 ++++++++++++++++++++++++++++++++++
+ tests/test_round10.py         |  65 +++++++++++++
+ 3 files changed, 268 insertions(+)
+ create mode 100644 PREREG_H1_BLOWOUT_MINUTES.md
+ create mode 100644 scripts/h1_blowout_minutes.py
+ create mode 100644 tests/test_round10.py
+
+diff --git a/PREREG_H1_BLOWOUT_MINUTES.md b/PREREG_H1_BLOWOUT_MINUTES.md
+new file mode 100644
+index 0000000..d20e3ae
+--- /dev/null
++++ b/PREREG_H1_BLOWOUT_MINUTES.md
+@@ -0,0 +1,35 @@
++# Pre-registration H1: blowout-driven minutes loss in starter props (2025–26)
++
++**Committed before any H1 statistic is computed.** No prior project analysis has conditioned starter props on the pre-game spread.
++
++## Hypothesis and mechanism
++In lopsided games, high-minute starters sit late, which fattens the left tail of their minutes. If opening prop prices are built mainly from per-game averages, then **UNDERS** on those starters in high-|spread| games will beat the de-vigged opening price.
++
++## Data (provenance-gated only)
++- Opening player props: the `bdl_opening_player_props` gate.
++- Opening game spreads: the `bdl_opening_game_odds` gate.
++- Both 2025–26 regular season. Box scores are played-minutes rows only, so DNP props (voided by books) are excluded.
++
++## Frozen definitions (`scripts/h1_blowout_minutes.py`, `FROZEN`)
++- **High-minute starter:** average ≥ 30.0 minutes over his last 10 played games before the game, with at least 5 such games.
++- **Team expected margin:** taken from the gated opening spread.
++  - Blowout group: |margin| ≥ 9.5.
++  - Competitive control: |margin| ≤ 4.5.
++  - Everything in between is excluded.
++- **Markets:** points, rebounds, assists, threes. Over/under only.
++- **Line selection:** fixed vendor priority, then the earliest gated row. One line per player-game-market.
++- **Bet:** the UNDER at its recorded opening price. Pushes = 0 P&L.
++
++## Frozen pass rule (blowout group, all markets pooled)
++**PASS only if all hold:**
++- ≥ 300 decided bets;
++- ROI at actual prices > 0;
++- excess ≥ 2.0 pp and z ≥ 2.5 under both multiplicative and power de-vig;
++- game-cluster bootstrap ROI 95% CI lower bound > 0;
++- the mechanism holds (starters' minutes relative to their prior average are lower in the blowout group than in the competitive group);
++- the blowout group's power-de-vig excess is higher than the competitive control's.
++
++**Anything else is a FAIL.** Per-market results are descriptive only and may not rescue a FAIL.
++
++## What a PASS would and would not mean
++2025–26 is the only documented season. A PASS would show an **information** effect in opening prices: the price missed something knowable before the game. It would not show an executable edge. It would license only a pre-registered 2026–27 shadow test, with the same frozen definitions, graded at logger-captured prices and on closing-line value. It would not license staking.
+diff --git a/scripts/h1_blowout_minutes.py b/scripts/h1_blowout_minutes.py
+new file mode 100644
+index 0000000..b651a93
+--- /dev/null
++++ b/scripts/h1_blowout_minutes.py
+@@ -0,0 +1,168 @@
++"""H1 (pre-registered in PREREG_H1_BLOWOUT_MINUTES.md): do opening prop prices under-price
++blowout-driven minutes loss for high-minute starters?
++
++Mechanism: in lopsided games starters sit late, so their minutes have a fat left tail that
++depends on the pre-game spread. If books build starter prop lines mostly from per-game
++averages, UNDERS on those starters in high-|spread| games should beat the de-vigged price.
++
++Inputs must be provenance-gated (scripts/quarantine_odds.py): eligible opening props, eligible
++opening game odds, played-minutes box scores (regular season, min > 0), and the game index.
++Frozen constants are below; nothing is tuned by this script.
++"""
++import argparse, json, math
++from collections import Counter, defaultdict
++from pathlib import Path
++
++import numpy as np
++
++from scripts.backtest_opening_spreads_totals import choose
++from scripts.backtest_prop_holdout import ALIASES, VENDORS
++from scripts.regular_season_filter import minutes as parse_minutes
++from v13.pricing import no_vig_pair, power_devig_pair, profit_per_unit, prop_prices, tip_times, wilson
++from v13.provenance import require_eligible
++
++FROZEN = {"starter_min_avg": 30.0, "starter_window": 10, "starter_min_games": 5,
++          "blowout_abs_spread": 9.5, "competitive_abs_spread": 4.5,
++          "markets": ("points", "rebounds", "assists", "threes"),
++          "pass": {"min_bets": 300, "min_excess": 0.02, "min_z": 2.5, "min_roi_pct": 0.0, "min_cluster_ci_low_pct": 0.0}}
++STAT = {"points": ("pts",), "rebounds": ("reb",), "assists": ("ast",), "threes": ("fg3m",)}
++
++
++def read(p):
++    return [json.loads(x) for x in Path(p).open() if x.strip()]
++
++
++def player_history(stats):
++    """player_id -> sorted list of (date, game_id, team_id, minutes, row)."""
++    h = defaultdict(list)
++    for r in stats:
++        g, pl, tm = r.get("game") or {}, r.get("player") or {}, r.get("team") or {}
++        if pl.get("id") is None or g.get("id") is None:
++            continue
++        h[str(pl["id"])].append((str(g.get("date"))[:10], str(g["id"]), str(tm.get("id")), parse_minutes(r.get("min")), r))
++    for v in h.values():
++        v.sort(key=lambda x: (x[0], x[1]))
++    return h
++
++
++def prop_lines(props, tips):
++    """One line per (game, player, market): fixed vendor priority, earliest gated row."""
++    best = {}
++    for r in props:
++        m = ALIASES.get(r.get("prop_type"))
++        if m not in FROZEN["markets"] or (r.get("market") or {}).get("type") != "over_under":
++            continue
++        over, under = prop_prices(r)
++        if over is None or under is None or r.get("line_value") is None:
++            continue
++        key = (str(r["game_id"]), str(r["player_id"]), m)
++        v = str(r.get("vendor") or "").lower()
++        rank = (VENDORS.index(v) if v in VENDORS else 99, str(r.get("opened_at")))
++        if key not in best or rank < best[key][0]:
++            best[key] = (rank, {"line": float(r["line_value"]), "over": over, "under": under})
++    return {k: v[1] for k, v in best.items()}
++
++
++def build(props, game_odds, stats, games):
++    tips = tip_times(games)
++    gl = choose(game_odds, tips)
++    home = {str(g["id"]): str((g.get("home_team") or {}).get("id")) for g in games}
++    hist = player_history(stats)
++    rows, skipped = [], Counter()
++    for (gid, pid, market), pl in prop_lines(props, tips).items():
++        o = gl.get(gid)
++        if not o or o.get("spread_home_value") is None:
++            skipped["no_gated_game_line"] += 1; continue
++        h = hist.get(pid, [])
++        idx = next((i for i, x in enumerate(h) if x[1] == gid), None)
++        if idx is None:
++            skipped["did_not_play_or_no_box"] += 1; continue  # book voids DNP props
++        prior = [x for x in h[:idx] if x[0] < h[idx][0]][-FROZEN["starter_window"]:]
++        if len(prior) < FROZEN["starter_min_games"]:
++            skipped["insufficient_history"] += 1; continue
++        avg_min = sum(x[3] for x in prior) / len(prior)
++        if avg_min < FROZEN["starter_min_avg"]:
++            skipped["not_high_minute_starter"] += 1; continue
++        team = prior[-1][2]  # team known before the game
++        spread_home = float(o["spread_home_value"])
++        team_margin = -spread_home if team == home.get(gid) else spread_home
++        a = abs(team_margin)
++        group = "blowout" if a >= FROZEN["blowout_abs_spread"] else ("competitive" if a <= FROZEN["competitive_abs_spread"] else "middle")
++        actual = sum(float(h[idx][4].get(f) or 0) for f in STAT[market])
++        d = actual - pl["line"]
++        outcome = "push" if abs(d) < 1e-9 else ("win" if d < 0 else "loss")  # UNDER is the tested side
++        rows.append({"game_id": gid, "player_id": pid, "market": market, "group": group, "team_margin": team_margin,
++                     "line": pl["line"], "price": pl["under"], "opp_price": pl["over"], "outcome": outcome,
++                     "minutes": h[idx][3], "avg_min_prior": avg_min,
++                     "p_mult": no_vig_pair(pl["under"], pl["over"])[0], "p_power": power_devig_pair(pl["under"], pl["over"])[0]})
++    return rows, skipped
++
++
++def grade(rows, reps=2000, seed=3):
++    d = [r for r in rows if r["outcome"] in ("win", "loss")]
++    n = len(d); w = sum(r["outcome"] == "win" for r in d)
++    out = {"bets": len(rows), "decided": n, "wins": w, "hit_95ci": wilson(w, n)}
++    if not n:
++        return out
++    pnl = [profit_per_unit(r["price"]) if r["outcome"] == "win" else -1.0 for r in d]
++    out["roi_pct"] = round(100 * sum(pnl) / n, 2)
++    for name, key in (("multiplicative", "p_mult"), ("power", "p_power")):
++        exp = sum(r[key] for r in d); var = sum(r[key] * (1 - r[key]) for r in d)
++        out[name] = {"expected": round(exp / n, 4), "excess": round((w - exp) / n, 4),
++                     "z": round((w - exp) / math.sqrt(var), 2) if var else None}
++    by = defaultdict(list)
++    for r, p in zip(d, pnl):
++        by[r["game_id"]].append(p)
++    groups = list(by.values())
++    if len(groups) >= 10:
++        rng = np.random.default_rng(seed)
++        boots = [100 * sum(sum(g) for g in (groups[i] for i in idx)) / sum(len(g) for g in (groups[i] for i in idx))
++                 for idx in (rng.integers(0, len(groups), len(groups)) for _ in range(reps))]
++        out["game_cluster_roi_95ci_pct"] = [round(float(np.percentile(boots, 2.5)), 2), round(float(np.percentile(boots, 97.5)), 2)]
++        out["games"] = len(groups)
++    return out
++
++
++def run(props, game_odds, stats, games, validated=True):
++    if validated:
++        require_eligible(props, "H1 props"); require_eligible(game_odds, "H1 game odds")
++    rows, skipped = build(props, game_odds, stats, games)
++    blow = [r for r in rows if r["group"] == "blowout"]
++    comp = [r for r in rows if r["group"] == "competitive"]
++    primary, control = grade(blow), grade(comp)
++    mech = {g: (round(float(np.mean([r["minutes"] - r["avg_min_prior"] for r in rs])), 2) if rs else None)
++            for g, rs in (("blowout", blow), ("competitive", comp))}
++    P = FROZEN["pass"]
++    checks = {
++        "bets_ge_300": primary["decided"] >= P["min_bets"],
++        "roi_gt_0": primary.get("roi_pct", -1) > P["min_roi_pct"],
++        "excess_ge_2pts_multiplicative": (primary.get("multiplicative") or {}).get("excess", -1) >= P["min_excess"],
++        "excess_ge_2pts_power": (primary.get("power") or {}).get("excess", -1) >= P["min_excess"],
++        "z_ge_2.5_multiplicative": ((primary.get("multiplicative") or {}).get("z") or -9) >= P["min_z"],
++        "z_ge_2.5_power": ((primary.get("power") or {}).get("z") or -9) >= P["min_z"],
++        "game_cluster_ci_low_gt_0": (primary.get("game_cluster_roi_95ci_pct") or [-1])[0] > P["min_cluster_ci_low_pct"],
++        "mechanism_minutes_lower_in_blowouts": mech["blowout"] is not None and mech["competitive"] is not None
++                                               and mech["blowout"] < mech["competitive"],
++        "excess_higher_than_competitive_control": ((primary.get("power") or {}).get("excess", -1)
++                                                   > (control.get("power") or {}).get("excess", 1)),
++    }
++    return {"hypothesis": "H1_blowout_minutes_unders", "frozen": FROZEN,
++            "evidence_class": "validated" if validated else "exploratory_unverified_prices",
++            "verdict": "PASS" if all(checks.values()) else "FAIL", "checks": checks,
++            "primary_blowout_unders": primary, "control_competitive_unders": control,
++            "minutes_minus_prior_avg": mech, "skipped": dict(skipped),
++            "descriptive_by_market": {m: grade([r for r in blow if r["market"] == m]) for m in FROZEN["markets"]}}
++
++
++def main():
++    p = argparse.ArgumentParser()
++    for k in ("props", "game-odds", "stats", "games", "out"):
++        p.add_argument(f"--{k}", required=True)
++    a = p.parse_args()
++    res = run(read(a.props), read(a.game_odds), read(a.stats), read(a.games))
++    Path(a.out).parent.mkdir(parents=True, exist_ok=True); Path(a.out).write_text(json.dumps(res, indent=2) + "\n")
++    print(json.dumps(res, indent=2)); print(f"VERDICT: {res['verdict']}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_round10.py b/tests/test_round10.py
+new file mode 100644
+index 0000000..1794c23
+--- /dev/null
++++ b/tests/test_round10.py
+@@ -0,0 +1,65 @@
++import math
++import random
++from datetime import date, timedelta
++
++import pytest
++
++from scripts.h1_blowout_minutes import run
++from v13.provenance import UnverifiedOddsError, quarantine
++
++
++def world(seed=0, book_knows_blowouts=False, n_days=150):
++    """Two starters per team; in |spread|>=9.5 games their minutes drop ~7. Lines either ignore that or not."""
++    rng = random.Random(seed)
++    games, odds, props, stats = [], [], [], []
++    teams = list(range(1, 11))
++    gid = 0
++    for d in range(n_days):
++        day = (date(2025, 10, 22) + timedelta(days=d)).isoformat()
++        rng.shuffle(teams)
++        for i in range(0, 10, 2):
++            h, a = teams[i], teams[i + 1]
++            gid += 1
++            spread = rng.choice([-14.5, -11.5, -9.5, -6.5, -3.5, -1.5, 2.5, 4.5, 8.5, 12.5])  # home handicap
++            games.append({"id": gid, "date": day, "datetime": day + "T23:30:00Z", "season": 2025,
++                          "home_team": {"id": h}, "visitor_team": {"id": a}, "status": "Final", "postseason": False})
++            odds.append({"game_id": gid, "vendor": "draftkings", "opened_at": day + "T14:00:00Z",
++                         "spread_home_value": str(spread), "spread_home_odds": -110, "spread_away_odds": -110,
++                         "total_value": "225.5", "total_over_odds": -110, "total_under_odds": -110})
++            blow = abs(spread) >= 9.5
++            for team in (h, a):
++                for k in range(2):
++                    pid = team * 10 + k
++                    mins = max(0.0, rng.gauss(34 - (7 if blow else 0), 3))
++                    rate = 0.7 + 0.1 * k
++                    pts = sum(rng.random() < rate for _ in range(int(mins)))
++                    stats.append({"min": f"{int(mins)}:00", "pts": pts, "reb": 0, "ast": 0, "fg3m": 0,
++                                  "player": {"id": pid}, "team": {"id": team}, "game": {"id": gid, "date": day}})
++                    exp_mins = 34 - (7 if (blow and book_knows_blowouts) else 0)
++                    line = math.floor(exp_mins * rate) + 0.5
++                    props.append({"game_id": gid, "player_id": pid, "vendor": "draftkings", "prop_type": "points",
++                                  "line_value": str(line), "opened_at": day + "T15:00:00Z",
++                                  "market": {"type": "over_under", "over_odds": -110, "under_odds": -110}})
++    gp, _, _ = quarantine(props, games, "bdl_opening_player_props")
++    go, _, _ = quarantine(odds, games, "bdl_opening_game_odds")
++    return gp, go, stats, games, props
++
++
++def test_h1_detects_unpriced_blowout_minutes_and_mechanism():
++    gp, go, stats, games, _ = world(1, book_knows_blowouts=False)
++    res = run(gp, go, stats, games)
++    assert res["checks"]["mechanism_minutes_lower_in_blowouts"]
++    assert res["primary_blowout_unders"]["power"]["excess"] > 0.1
++    assert res["verdict"] == "PASS"
++
++
++def test_h1_fails_when_book_prices_blowouts():
++    gp, go, stats, games, _ = world(2, book_knows_blowouts=True)
++    res = run(gp, go, stats, games)
++    assert res["verdict"] == "FAIL"
++
++
++def test_h1_refuses_ungated_inputs():
++    _, go, stats, games, raw_props = world(3)
++    with pytest.raises(UnverifiedOddsError):
++        run(raw_props, go, stats, games)
+-- 
+2.43.0
+

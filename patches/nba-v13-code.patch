@@ -1,0 +1,3139 @@
+From 9319a4ed94de56cfe395fe58617933177afb185d Mon Sep 17 00:00:00 2001
+From: Claude audit <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 14:51:04 -0500
+Subject: [PATCH 1/4] Audit fixes: real opening prices, strict pre-tip line
+ filter, nested threshold selection, day-start staking, ledger integrity
+ audit, cross-season 3PT validation
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ HANDOFF_CHATGPT.md                         |  62 +++++
+ scripts/audit_prop_ledger.py               | 157 +++++++++++
+ scripts/backtest_opening_spreads_totals.py |   5 +-
+ scripts/backtest_prop_holdout_v2.py        | 291 +++++++++++++++++++++
+ scripts/holdout_spreads_totals.py          |  21 +-
+ scripts/run_spread_total_holdout.py        |  16 +-
+ tests/test_pricing_and_v2.py               | 179 +++++++++++++
+ v13/pricing.py                             | 110 ++++++++
+ 8 files changed, 829 insertions(+), 12 deletions(-)
+ create mode 100644 HANDOFF_CHATGPT.md
+ create mode 100644 scripts/audit_prop_ledger.py
+ create mode 100644 scripts/backtest_prop_holdout_v2.py
+ create mode 100644 tests/test_pricing_and_v2.py
+ create mode 100644 v13/pricing.py
+
+diff --git a/HANDOFF_CHATGPT.md b/HANDOFF_CHATGPT.md
+new file mode 100644
+index 0000000..275b663
+--- /dev/null
++++ b/HANDOFF_CHATGPT.md
+@@ -0,0 +1,62 @@
++# Implementation handoff — independent audit, 2026-10-14
++
++Read this whole file before changing code. It is ordered: do not start a phase until the
++previous phase's gate has been reported to the owner. Never tune anything on a holdout
++after seeing it, never invent prices or lines, and report failures as plainly as successes.
++
++## Already done on branch `audit/claude-2026-10-14` (tested offline, NOT yet run on real data)
++
++| File | What it does |
++|---|---|
++| `v13/pricing.py` | American-odds payout, implied and de-vigged probabilities, reads real prices from BALLDONTLIE records (`market.over_odds/under_odds`; `spread_home_odds`, `total_over_odds`, ...), strict `opened_at < tip` check using game `datetime`, Wilson intervals |
++| `scripts/audit_prop_ledger.py` | Re-audits the EXISTING `holdout_2025.json` ledger: ROI at actual opening prices vs -110, pre-tip verification, duplicate/conflicting lines, excess hit rate vs de-vigged market, splits by side/line/price/vendor/month/edge |
++| `scripts/backtest_prop_holdout_v2.py` | New prop backtest: actual prices (rows without prices excluded, never filled), pre-tip filter, threshold chosen on an inner validation slice with out-of-sample projections, start-of-day staking, edge selector and EV selector (Poisson/normal probability vs actual price), optional cross-season mode |
++| `scripts/holdout_spreads_totals.py`, `run_spread_total_holdout.py`, `backtest_opening_spreads_totals.py` | Optional `--games` pre-tip filter and `--pricing actual`; legacy defaults unchanged so old numbers reproduce |
++| `.github/workflows/prop-integrity-v2.yml` | Runs all of the above on existing artifacts (manual dispatch) |
++| `tests/test_pricing_and_v2.py` | 12 tests, including a synthetic demonstration that -110 grading of half-point count lines produces ~60% hit rates with no skill |
++
++The original `backtest_prop_holdout.py` is deliberately unchanged so earlier results can be reproduced.
++
++## Phase 0 — Merge and run (no new modelling)
++
++1. Merge the branch. Run `python -m pytest -q`; all tests must pass.
++2. Dispatch **V13 Prop Integrity Audit v2**. If an artifact has expired, re-run the collector workflow that produced it first (pilot artifact retention is 30 days).
++3. Add a one-off check that the spread sign is right: on the 2025 opening odds, `corr(-spread_home_value, actual_home_margin)` must be clearly positive (expect roughly 0.4–0.5). If it is negative, every spread result is reversed; stop and report.
++4. Report to the owner, verbatim from the artifact JSON: for threes and assists, `overall` and `pregame_verified_only` from `ledger_audit_*`, the `by_side` and `by_price` tables, and the v2 within-season and cross-season holdout blocks for both selectors.
++
++**Gate 0:** the 3PT result is treated as real only if ALL hold: pre-tip-verified ROI at actual prices > 0; `excess_hit_rate_vs_market` ≥ 0.02 with z ≥ 2.5; holds for both overs and unders; holds in the 2024→2025 cross-season run. Otherwise record it as a pricing artifact and move on. Do not search for a sub-slice that rescues it.
++
++## Phase 1 — Data you cannot recreate later
++
++5. Persist raw source data outside Actions artifacts: upload JSONL/Parquet to a GitHub Release per season (or a cloud bucket), with a manifest holding row counts, date range, SHA-256 and the collector commit.
++6. Start a live price logger now (scheduled every 15 minutes on game days): BALLDONTLIE `/nba/v2/odds` and `/nba/v2/odds/player_props`, append-only, keyed by game, player, market, vendor, line, prices and `updated_at`. This is the only way to get closing lines and CLV going forward.
++7. Probe and record opening game-odds and prop coverage (rows per game, share with both prices) for 2022-23, 2023-24 and 2024-25. Report gaps; never fill them.
++
++## Phase 2 — Honest probability models
++
++8. Replace "edge in points" with a probability per bet: negative binomial for threes, assists and rebounds (fit dispersion per stat on training data), normal with training-residual sigma for points and PRA. `p_over` in `backtest_prop_holdout_v2.py` is the Poisson starting point.
++9. Add a minutes model before adding any other feature: predicted minutes from recent minutes, starter flag, teammates out (only from pre-tip injury reports), rest, and spread-based blowout risk. Then model per-minute rates with empirical-Bayes shrinkage.
++10. Blend with the market in log-odds, fitted on validation seasons only: `logit(p) = a*logit(p_market_devigged) + b*logit(p_model) + c`. Report a, b, c. If b ≈ 0, the model adds nothing; say so.
++11. Calibrate with isotonic regression on validation folds; on the holdout report reliability tables, Brier score and log loss versus the de-vigged market for each market and season.
++
++**Gate 2:** the blended model must beat the de-vigged market's log loss on a holdout season it never saw. If it does not, stop before building a portfolio.
++
++## Phase 3 — Selection, tiers and staking
++
++12. Rank every candidate across markets by EV per unit at the actual price, using a conservative probability (5th percentile of a bootstrap over training residuals).
++13. Limits before selection: one bet per player per game, two per game, 6% daily exposure, zero-bet nights allowed.
++14. Tier map frozen before the holdout (quarter-Kelly at -110): A = 1% needs lower-bound p ≥ 0.543, A+ = 2% needs ≥ 0.562, A++ = 3% needs ≥ 0.581; for other prices use f* = (p·b − (1 − p)) / b and stake = min(f*/4, 3%).
++15. Choose EV cutoffs on validation seasons to produce 100 / 150 / 200 / 250 / 300 bets; score the frozen cutoffs on the holdout. Report flat 1% and tiered staking side by side: ending bankroll, max drawdown, longest losing streak, per-tier hit rate with Wilson intervals, and 10,000-path Monte Carlo resampling of the holdout ledger.
++
++## Phase 4 — Spreads and totals
++
++16. Totals = projected possessions × (home + away points per possession). Possessions = FGA − ORB + TOV + 0.44·FTA, from opponent-adjusted rolling estimates with time decay and preseason priors.
++17. Spreads = ridge-regressed opponent-adjusted team ratings, plus availability adjustments from pre-tip injury reports only, then a residual model against the opening line.
++18. Use rolling-origin validation across all seasons with opening odds; untouched final season; report every season, winning or losing.
++
++## Rules that apply throughout
++
++- Every result file states: pricing source, line timestamp rule, train/validation/test dates, code commit, and every configuration that was tried (not only the winner).
++- Never use `opened_at` without checking it is before the game's `datetime`.
++- A missing price or line means the bet is excluded and counted, never assumed.
++- Never report a hit rate without its count and 95% interval.
+diff --git a/scripts/audit_prop_ledger.py b/scripts/audit_prop_ledger.py
+new file mode 100644
+index 0000000..132eec7
+--- /dev/null
++++ b/scripts/audit_prop_ledger.py
+@@ -0,0 +1,157 @@
++"""Integrity audit of an existing prop holdout ledger against its source lines.
++
++Answers: does the hit rate survive (1) real opening prices, (2) a strict
++pre-tip timestamp check, (3) duplicate/alternate line checks, and (4) the
++market's own de-vigged expectation? Run it on the artifacts you already have:
++
++python -m scripts.audit_prop_ledger \
++  --report research_results/prop_backtest/holdout_2025.json \
++  --lines research_results/prop_openings_full/opening_props_2025.jsonl \
++  --games research_data/game_history/games_2025.jsonl \
++  --market threes --out research_results/integrity/threes_ledger_audit_2025.json
++
++Descriptive only. Never use these slices to pick new thresholds on the same holdout.
++"""
++import argparse, json, math
++from collections import Counter, defaultdict
++from pathlib import Path
++
++from scripts.backtest_prop_holdout import ALIASES, normalize_lines
++from v13.pricing import (ASSUMED_110, implied_probability, no_vig_pair, parse_utc, pregame_status,
++                         profit_per_unit, prop_prices, tip_times, wilson)
++
++
++def read_jsonl(path):
++    return [json.loads(x) for x in Path(path).open() if x.strip()]
++
++
++def line_bucket(line):
++    if line <= 0.5: return "0.5"
++    if line <= 1.5: return "1.5"
++    if line <= 2.5: return "2.5"
++    if line <= 3.5: return "3.5"
++    return "4.5+"
++
++
++def price_bucket(odds):
++    if odds is None: return "missing"
++    if odds <= -150: return "<=-150"
++    if odds <= -121: return "-149..-121"
++    if odds <= -100: return "-120..-100"
++    return "plus_money"
++
++
++def timing_bucket(status, minutes):
++    if status != "pregame": return status
++    if minutes < 60: return "pregame_<1h"
++    if minutes < 360: return "pregame_1-6h"
++    return "pregame_>6h"
++
++
++def summarize(bets):
++    decided = [b for b in bets if b["outcome"] in ("win", "loss")]
++    n = len(decided); w = sum(b["outcome"] == "win" for b in decided)
++    out = {"bets": len(bets), "wins": w, "losses": n - w,
++           "pushes": len(bets) - n, "hit_rate": round(w / n, 4) if n else None,
++           "hit_rate_95ci": wilson(w, n)}
++    out["roi_flat_at_assumed_110_pct"] = round(100 * sum(
++        profit_per_unit(ASSUMED_110) if b["outcome"] == "win" else -1 for b in decided) / n, 2) if n else None
++    priced = [b for b in decided if b["price"] is not None]
++    out["priced_bets"] = len(priced)
++    if priced:
++        out["roi_flat_at_actual_price_pct"] = round(100 * sum(
++            profit_per_unit(b["price"]) if b["outcome"] == "win" else -1 for b in priced) / len(priced), 2)
++        out["mean_breakeven_hit_rate"] = round(sum(implied_probability(b["price"]) for b in priced) / len(priced), 4)
++    fair = [b for b in priced if b["market_prob"] is not None]
++    if fair:
++        # Market-adjusted edge: realized wins minus what the de-vigged market expected.
++        exp = sum(b["market_prob"] for b in fair)
++        var = sum(b["market_prob"] * (1 - b["market_prob"]) for b in fair)
++        wins = sum(b["outcome"] == "win" for b in fair)
++        out["market_expected_hit_rate"] = round(exp / len(fair), 4)
++        out["excess_hit_rate_vs_market"] = round((wins - exp) / len(fair), 4)
++        out["excess_z_score"] = round((wins - exp) / math.sqrt(var), 2) if var > 0 else None
++    return out
++
++
++def audit(report, lines, games, market):
++    ledger = (report.get("markets", {}).get(market) or {}).get("ridge_holdout_ledger") or []
++    if not ledger:
++        raise RuntimeError(f"No holdout ledger for market '{market}' in report")
++    chosen = normalize_lines(lines)  # exactly the row the backtest graded
++    tips = tip_times(games)
++
++    all_rows = defaultdict(list)
++    for r in lines:
++        m = ALIASES.get(r.get("prop_type"))
++        if m == market and (r.get("market") or {}).get("type") == "over_under":
++            all_rows[(str(r["game_id"]), str(r["player_id"]))].append(r)
++    multi_rows = sum(len(v) > 1 for v in all_rows.values())
++    multi_values = sum(len({str(x.get("line_value")) for x in v}) > 1 for v in all_rows.values())
++    same_vendor_multi = sum(any(c > 1 for c in Counter(str(x.get("vendor")).lower() for x in v).values())
++                            for v in all_rows.values())
++
++    bets, unmatched = [], 0
++    for b in ledger:
++        found = chosen.get((str(b["game_id"]), str(b["player_id"]), market))
++        if found is None or abs(float(found[1]) - float(b["line"])) > 1e-9:
++            unmatched += 1; continue
++        row = found[0]
++        over, under = prop_prices(row)
++        price = over if b["side"] == "over" else under
++        market_prob = None
++        if over is not None and under is not None:
++            p_over, p_under = no_vig_pair(over, under)
++            market_prob = p_over if b["side"] == "over" else p_under
++        tip = tips.get(str(b["game_id"]))
++        status = pregame_status(row.get("opened_at"), tip)
++        minutes = None
++        if status == "pregame":
++            minutes = (tip - parse_utc(row["opened_at"])).total_seconds() / 60
++        edge = abs(float(b["projection"]) - float(b["line"]))
++        bets.append({**b, "price": price, "market_prob": market_prob, "timing": timing_bucket(status, minutes),
++                     "line_bucket": line_bucket(float(b["line"])), "price_bucket": price_bucket(price),
++                     "edge_bucket": "<1" if edge < 1 else ("1-1.5" if edge < 1.5 else ">=1.5"),
++                     "month": str(b["date"])[:7], "vendor": str(row.get("vendor"))})
++
++    def by(field):
++        groups = defaultdict(list)
++        for x in bets: groups[x[field]].append(x)
++        return {k: summarize(v) for k, v in sorted(groups.items())}
++
++    return {
++        "market": market,
++        "ledger_bets": len(ledger), "matched_to_source_row": len(bets), "unmatched": unmatched,
++        "games_with_tip_time": len(tips),
++        "source_keys": len(all_rows),
++        "keys_with_multiple_rows": multi_rows,
++        "keys_with_multiple_distinct_line_values": multi_values,
++        "keys_with_multiple_rows_same_vendor": same_vendor_multi,
++        "overall": summarize(bets),
++        "pregame_verified_only": summarize([x for x in bets if x["timing"].startswith("pregame")]),
++        "by_side": by("side"), "by_line": by("line_bucket"), "by_price": by("price_bucket"),
++        "by_timing": by("timing"), "by_vendor": by("vendor"), "by_month": by("month"),
++        "by_edge": by("edge_bucket"),
++        "reading_guide": [
++            "If roi_flat_at_actual_price is far below the -110 ROI, the edge was mostly vig mis-pricing.",
++            "excess_hit_rate_vs_market is the honest edge estimate: realized wins minus de-vigged market expectation.",
++            "Any post_tip or unverifiable rows invalidate those bets; judge on pregame_verified_only.",
++            "keys_with_multiple_rows_same_vendor > 0 means the earliest-row tiebreak picked among several lines; inspect them.",
++        ],
++    }
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--report", required=True); p.add_argument("--lines", required=True)
++    p.add_argument("--games", required=True); p.add_argument("--market", default="threes")
++    p.add_argument("--out", required=True)
++    a = p.parse_args()
++    result = audit(json.loads(Path(a.report).read_text()), read_jsonl(a.lines), read_jsonl(a.games), a.market)
++    out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
++    out.write_text(json.dumps(result, indent=2) + "\n")
++    print(json.dumps({k: v for k, v in result.items() if not k.startswith("by_")}, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/backtest_opening_spreads_totals.py b/scripts/backtest_opening_spreads_totals.py
+index 54de8d8..b782f47 100644
+--- a/scripts/backtest_opening_spreads_totals.py
++++ b/scripts/backtest_opening_spreads_totals.py
+@@ -7,6 +7,7 @@ import argparse,json,os,time,requests
+ from pathlib import Path
+ from collections import Counter
+ from datetime import datetime,timezone,timedelta
++from v13.pricing import pregame_status
+ 
+ URL="https://api.balldontlie.io/nba/v2/odds/opening"
+ VENDORS=("draftkings","fanduel","betmgm","caesars","betrivers","fanatics")
+@@ -36,12 +37,14 @@ def fetch(ids,key):
+         time.sleep(.25)
+     return allrows
+ 
+-def choose(rows):
++def choose(rows,tips=None):
++    """One opening row per game. With tips (game_id -> UTC tip), rows not opened before tip are dropped."""
+     result={}
+     for r in rows:
+         gid=str(r.get("game_id"));vendor=str(r.get("vendor") or "").lower()
+         opened=r.get("opened_at")
+         if not opened:continue
++        if tips is not None and pregame_status(opened,tips.get(gid))!="pregame":continue
+         try:stamp=datetime.fromisoformat(opened.replace("Z","+00:00"))
+         except (ValueError,TypeError):continue
+         if stamp.tzinfo is None:continue
+diff --git a/scripts/backtest_prop_holdout_v2.py b/scripts/backtest_prop_holdout_v2.py
+new file mode 100644
+index 0000000..5ab40ff
+--- /dev/null
++++ b/scripts/backtest_prop_holdout_v2.py
+@@ -0,0 +1,291 @@
++"""Prop holdout backtest v2: real prices, pre-tip guard, nested selection, cross-season mode.
++
++Differences from backtest_prop_holdout.py (kept unchanged for reproducibility):
++  1. Grades at the actual opening over/under price in the source record (--pricing actual).
++     Rows with no usable price are excluded and counted, never filled with -110.
++  2. Drops any line whose opened_at is not strictly before tip (needs --games). Fail closed.
++  3. Threshold is chosen on an inner validation slice of TRAIN using out-of-sample
++     projections, not in-sample fitted values.
++  4. Stakes are 1% of the bankroll at the START of each betting day (no intraday compounding
++     on results that would not yet be known).
++  5. Two selectors are reported side by side: raw point edge (legacy) and expected value
++     from a count/normal distribution priced against the actual offered odds.
++  6. Optional cross-season mode: train on a complete prior season, test on the full target
++     season. This is the multi-season validation the within-season split cannot provide.
++
++Example (within-season):
++  python -m scripts.backtest_prop_holdout_v2 --features props_2025.jsonl --lines opening_props_2025.jsonl \
++      --games games_2025.jsonl --out research_results/prop_backtest_v2/holdout_2025.json
++Cross-season (train 2024-25, test 2025-26):
++  ... --prior-features props_2024.jsonl --prior-lines opening_props_2024.jsonl --prior-games games_2024.jsonl
++"""
++import argparse, json, math
++from collections import Counter, defaultdict
++from pathlib import Path
++
++import numpy as np
++from sklearn.linear_model import Ridge
++
++from scripts.backtest_prop_holdout import ALIASES, FEATURES, MARKETS, VENDORS
++from v13.pricing import (ASSUMED_110, implied_probability, no_vig_pair, pregame_status,
++                         profit_per_unit, prop_prices, tip_times, wilson)
++
++COUNT_MARKETS = {"threes", "assists", "rebounds"}
++EDGE_GRID = {"points": [2, 3, 4, 5], "rebounds": [1, 1.5, 2, 2.5], "assists": [1, 1.5, 2],
++             "threes": [.5, 1, 1.5], "pra": [3, 4, 5, 6]}
++EV_GRID = [0.0, 0.02, 0.04, 0.06, 0.08, 0.10]
++MIN_SELECTION_BETS = 40
++
++
++def read(path):
++    return [json.loads(x) for x in Path(path).open() if x.strip()]
++
++
++def normalize_lines(rows, tips, coverage):
++    """One record per (game, player, market): vendor priority, then earliest PREGAME row."""
++    selected = {}
++    for r in rows:
++        if (r.get("market") or {}).get("type") != "over_under":
++            continue
++        market = ALIASES.get(r.get("prop_type"))
++        if market not in MARKETS or r.get("line_value") is None:
++            continue
++        try:
++            line = float(r["line_value"])
++        except (TypeError, ValueError):
++            continue
++        if not math.isfinite(line):
++            continue
++        status = pregame_status(r.get("opened_at"), tips.get(str(r.get("game_id"))))
++        if status != "pregame":
++            coverage[f"line_{status}"] += 1
++            continue
++        key = (str(r["game_id"]), str(r["player_id"]), market)
++        vendor = str(r.get("vendor") or "").lower()
++        rank = (VENDORS.index(vendor) if vendor in VENDORS else 99, str(r["opened_at"]), str(r.get("id", "")))
++        if key in selected:
++            coverage["duplicate_pregame_rows"] += 1
++            if abs(selected[key][2] - line) > 1e-9:
++                coverage["conflicting_line_values"] += 1
++        if key not in selected or rank < selected[key][0]:
++            selected[key] = (rank, r, line)
++    return {k: (v[1], v[2]) for k, v in selected.items()}
++
++
++def dataset(features, lines, tips, coverage):
++    chosen = normalize_lines(lines, tips, coverage)
++    out = []
++    for f in features:
++        for market in MARKETS:
++            found = chosen.get((str(f["game_id"]), str(f["player_id"]), market))
++            if found is None:
++                continue
++            raw, line = found
++            try:
++                x = [float(f[k]) for k in FEATURES(market)]
++                actual = float(f[f"{market}_actual"])
++            except (KeyError, TypeError, ValueError):
++                continue
++            over, under = prop_prices(raw)
++            out.append({"date": f["game_date"], "game_id": str(f["game_id"]), "player_id": str(f["player_id"]),
++                        "market": market, "line": line, "actual": actual, "x": x,
++                        "over_odds": over, "under_odds": under,
++                        "vendor": raw.get("vendor"), "opened_at": raw.get("opened_at")})
++    return out
++
++
++def p_over(projection, line, market, sigma):
++    """P(actual > line). Poisson for count markets, normal otherwise. Half-lines only."""
++    mu = max(projection, 1e-6)
++    if market in COUNT_MARKETS:
++        k = math.floor(line)  # P(X > line) = 1 - P(X <= floor(line))
++        term = math.exp(-mu); cdf = term
++        for i in range(1, k + 1):
++            term *= mu / i; cdf += term
++        return min(max(1 - cdf, 1e-6), 1 - 1e-6)
++    z = (line - mu) / max(sigma, 1e-6)
++    return min(max(0.5 * math.erfc(z / math.sqrt(2)), 1e-6), 1 - 1e-6)
++
++
++def price_for(r, side, pricing):
++    if pricing == "assumed110":
++        return ASSUMED_110
++    return r["over_odds"] if side == "over" else r["under_odds"]
++
++
++def decide(r, selector, threshold, pricing, sigma):
++    """Return (side, score) if the row qualifies, else None."""
++    if r["line"] != math.floor(r["line"]) + 0.5 and selector == "ev":
++        return None  # integer lines need push-aware pricing; excluded from the EV selector
++    if selector == "edge":
++        diff = r["projection"] - r["line"]
++        if abs(diff) < threshold:
++            return None
++        return ("over" if diff > 0 else "under"), abs(diff)
++    po = p_over(r["projection"], r["line"], r["market"], sigma)
++    best = None
++    for side, p in (("over", po), ("under", 1 - po)):
++        price = price_for(r, side, pricing)
++        if price is None:
++            continue
++        ev = p * profit_per_unit(price) - (1 - p)
++        if ev >= threshold and (best is None or ev > best[1]):
++            best = (side, ev)
++    return best
++
++
++def simulate(rows, selector, threshold, pricing, sigma, bankroll=10000.0):
++    ledger, peak, skipped = [], bankroll, Counter()
++    bydate = defaultdict(list)
++    for r in rows:
++        bydate[r["date"]].append(r)
++    for day in sorted(bydate):
++        day_start = bankroll  # stakes sized before any of today's results are known
++        for r in sorted(bydate[day], key=lambda r: (r["game_id"], r["player_id"])):
++            pick = decide(r, selector, threshold, pricing, sigma)
++            if pick is None:
++                continue
++            side, score = pick
++            price = price_for(r, side, pricing)
++            if price is None:
++                skipped["missing_price"] += 1
++                continue
++            delta = r["actual"] - r["line"]
++            outcome = "push" if abs(delta) < 1e-9 else ("win" if (delta > 0) == (side == "over") else "loss")
++            stake = round(day_start * 0.01, 2)
++            pnl = round(stake * (profit_per_unit(price) if outcome == "win" else -1 if outcome == "loss" else 0), 2)
++            bankroll = round(bankroll + pnl, 2); peak = max(peak, bankroll)
++            market_prob = None
++            if r["over_odds"] is not None and r["under_odds"] is not None:
++                po_m, pu_m = no_vig_pair(r["over_odds"], r["under_odds"])
++                market_prob = po_m if side == "over" else pu_m
++            ledger.append({"date": r["date"], "game_id": r["game_id"], "player_id": r["player_id"],
++                           "market": r["market"], "vendor": r["vendor"], "opened_at": r["opened_at"],
++                           "line": r["line"], "projection": round(r["projection"], 3), "side": side,
++                           "price": price, "score": round(score, 4), "market_prob": market_prob,
++                           "outcome": outcome, "stake": stake, "pnl": pnl, "bankroll": bankroll,
++                           "drawdown_pct": round(100 * (peak - bankroll) / peak, 3)})
++    return summarize(ledger, skipped)
++
++
++def summarize(ledger, skipped=None):
++    c = Counter(x["outcome"] for x in ledger); n = c["win"] + c["loss"]
++    fair = [x for x in ledger if x["outcome"] in ("win", "loss") and x["market_prob"] is not None]
++    excess = None
++    if fair:
++        exp = sum(x["market_prob"] for x in fair); var = sum(x["market_prob"] * (1 - x["market_prob"]) for x in fair)
++        wins = sum(x["outcome"] == "win" for x in fair)
++        excess = {"bets": len(fair), "market_expected_hit_rate": round(exp / len(fair), 4),
++                  "realized_hit_rate": round(wins / len(fair), 4),
++                  "excess": round((wins - exp) / len(fair), 4),
++                  "z": round((wins - exp) / math.sqrt(var), 2) if var > 0 else None}
++    staked = sum(x["stake"] for x in ledger)
++    sides = {s: dict(Counter(x["outcome"] for x in ledger if x["side"] == s)) for s in ("over", "under")}
++    return {"bets": len(ledger), "wins": c["win"], "losses": c["loss"], "pushes": c["push"],
++            "hit_rate": round(c["win"] / n, 4) if n else None, "hit_rate_95ci": wilson(c["win"], n),
++            "mean_breakeven": round(sum(implied_probability(x["price"]) for x in ledger) / len(ledger), 4) if ledger else None,
++            "roi_on_turnover_pct": round(100 * sum(x["pnl"] for x in ledger) / staked, 2) if staked else None,
++            "ending_bankroll": ledger[-1]["bankroll"] if ledger else 10000.0,
++            "max_drawdown_pct": max((x["drawdown_pct"] for x in ledger), default=0),
++            "by_side": sides, "vs_devigged_market": excess,
++            "skipped": dict(skipped or {}), "ledger": ledger}
++
++
++def fit(train):
++    X = np.array([r["x"] for r in train]); y = np.array([r["actual"] for r in train])
++    mu = X.mean(axis=0); sd = X.std(axis=0); sd[sd < 1e-8] = 1
++    model = Ridge(alpha=25.0).fit((X - mu) / sd, y)
++    resid = y - model.predict((X - mu) / sd)
++    return (lambda rows: [float(v) for v in model.predict((np.array([r["x"] for r in rows]) - mu) / sd)]), float(resid.std())
++
++
++def project(rows, predictor):
++    if rows:
++        for r, v in zip(rows, predictor(rows)):
++            r["projection"] = v
++
++
++def evaluate_market(train, test, market, pricing):
++    if len(train) < 150 or len(test) < 50:
++        return {"status": "insufficient coverage", "train": len(train), "test": len(test)}
++    dates = sorted({r["date"] for r in train})
++    inner_cut = dates[int(len(dates) * 0.7)]
++    inner = [dict(r) for r in train if r["date"] < inner_cut]
++    valid = [dict(r) for r in train if r["date"] >= inner_cut]
++    if len(inner) < 100 or len(valid) < 50 or len(test) < 50:
++        return {"status": "insufficient coverage", "train": len(train), "test": len(test)}
++    predictor, sigma = fit(inner)
++    project(valid, predictor)  # out-of-sample projections for threshold choice
++    out = {"status": "evaluated", "train_rows": len(train), "validation_rows": len(valid), "test_rows": len(test)}
++    final_predictor, final_sigma = fit(train)
++    test = [dict(r) for r in test]; project(test, final_predictor)
++    for selector, grid in (("edge", EDGE_GRID[market]), ("ev", EV_GRID)):
++        scored = [(t, simulate(valid, selector, t, pricing, sigma)) for t in grid]
++        eligible = [(t, s) for t, s in scored if s["bets"] >= MIN_SELECTION_BETS]
++        if not eligible:
++            out[selector] = {"status": "no qualifying validation threshold"}; continue
++        t, val = max(eligible, key=lambda item: (item[1]["roi_on_turnover_pct"], -item[1]["bets"]))
++        held = simulate(test, selector, t, pricing, final_sigma)
++        out[selector] = {"threshold": t,
++                         "validation": {k: v for k, v in val.items() if k != "ledger"},
++                         "holdout": {k: v for k, v in held.items() if k != "ledger"},
++                         "holdout_ledger": held["ledger"]}
++    return out
++
++
++def evaluate(features, lines, games, pricing="actual", prior=None):
++    if not tip_times(games):
++        raise RuntimeError("No tip times in games index; cannot verify pregame lines")
++    coverage = Counter()
++    rows = dataset(features, lines, tip_times(games), coverage)
++    report = {"pricing": pricing, "line_rule": "vendor priority, earliest row with opened_at < tip",
++              "coverage": dict(coverage), "matched_rows": len(rows), "markets": {}}
++    if prior:
++        prior_cov = Counter()
++        train_all = dataset(prior["features"], prior["lines"], tip_times(prior["games"]), prior_cov)
++        report.update(mode="cross_season", prior_coverage=dict(prior_cov), prior_rows=len(train_all))
++        test_all = rows
++    else:
++        dates = sorted({r["date"] for r in rows})
++        if len(dates) < 30:
++            raise RuntimeError("Insufficient dated rows")
++        cutoff = dates[int(len(dates) * 0.65)]
++        report.update(mode="within_season", holdout_start=cutoff)
++        train_all = [r for r in rows if r["date"] < cutoff]
++        test_all = [r for r in rows if r["date"] >= cutoff]
++    priced = sum(r["over_odds"] is not None and r["under_odds"] is not None for r in rows)
++    report["rows_with_both_prices"] = priced
++    for market in MARKETS:
++        report["markets"][market] = evaluate_market(
++            [r for r in train_all if r["market"] == market], [r for r in test_all if r["market"] == market],
++            market, pricing)
++    return report
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--features", required=True); p.add_argument("--lines", required=True)
++    p.add_argument("--games", required=True); p.add_argument("--out", required=True)
++    p.add_argument("--pricing", choices=("actual", "assumed110"), default="actual")
++    p.add_argument("--prior-features"); p.add_argument("--prior-lines"); p.add_argument("--prior-games")
++    a = p.parse_args()
++    prior = None
++    if a.prior_features or a.prior_lines or a.prior_games:
++        if not (a.prior_features and a.prior_lines and a.prior_games):
++            raise SystemExit("Cross-season mode needs --prior-features, --prior-lines and --prior-games")
++        prior = {"features": read(a.prior_features), "lines": read(a.prior_lines), "games": read(a.prior_games)}
++    result = evaluate(read(a.features), read(a.lines), read(a.games), a.pricing, prior)
++    out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
++    out.write_text(json.dumps(result, indent=2) + "\n")
++    brief = {k: v for k, v in result.items() if k != "markets"}
++    brief["markets"] = {m: {s: (v.get(s) or {}).get("holdout", (v.get(s) or {}).get("status"))
++                            for s in ("edge", "ev")} if v.get("status") == "evaluated" else v
++                        for m, v in result["markets"].items()}
++    for m in brief["markets"].values():
++        for s in ("edge", "ev"):
++            if isinstance(m.get(s), dict): m[s] = {k: x for k, x in m[s].items() if k != "ledger"}
++    print(json.dumps(brief, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/holdout_spreads_totals.py b/scripts/holdout_spreads_totals.py
+index 331dcea..56f53d2 100644
+--- a/scripts/holdout_spreads_totals.py
++++ b/scripts/holdout_spreads_totals.py
+@@ -6,9 +6,11 @@ import argparse,json,math
+ from pathlib import Path
+ from collections import Counter
+ from scripts.backtest_opening_spreads_totals import choose
++from v13.pricing import ASSUMED_110,game_price,profit_per_unit
+ def load(p):return [json.loads(x) for x in Path(p).open() if x.strip()]
+-def make(predictions,odds):
+- selected=choose(odds);rows=[]
++def make(predictions,odds,tips=None,pricing="assumed110",skipped=None):
++ """pricing='actual' grades each side at its own sourced opening price; rows lacking it are skipped."""
++ selected=choose(odds,tips);rows=[]
+  for p in predictions:
+   r=selected.get(str(p["game_id"]))
+   if r is None:continue
+@@ -20,16 +22,23 @@ def make(predictions,odds):
+    if not all(math.isfinite(x) for x in (line,pred,actual)):continue
+    edge=pred+line if market=="spread" else pred-line
+    delta=actual+line if market=="spread" else actual-line
++   side=("home" if edge>0 else "away") if market=="spread" else ("over" if edge>0 else "under")
++   price=ASSUMED_110 if pricing=="assumed110" else game_price(r,market,side)
++   if price is None:
++    if skipped is not None:skipped[f"{market}_missing_price"]=skipped.get(f"{market}_missing_price",0)+1
++    continue
+    rows.append({"date":p["date"],"game_id":p["game_id"],"market":market,
+-    "edge":edge,"delta":delta,"line":line,"vendor":r.get("vendor")})
++    "edge":edge,"delta":delta,"line":line,"vendor":r.get("vendor"),"price":price,"payout":profit_per_unit(price)})
+  return rows
+-def sim(rows,threshold):
+- bank=10000.;peak=bank;out=[]
++def sim(rows,threshold,day_staking=False):
++ """day_staking=True sizes every bet from the bankroll at the start of its date."""
++ bank=10000.;peak=bank;out=[];day=None;day_start=bank
+  for r in sorted(rows,key=lambda x:(x["date"],str(x["game_id"]))):
++  if r["date"]!=day:day=r["date"];day_start=bank
+   if abs(r["edge"])<threshold:continue
+   win=(r["edge"]>0)==(r["delta"]>0)
+   outcome="push" if abs(r["delta"])<1e-9 else ("win" if win else "loss")
+-  stake=round(bank*.01,2);pnl=round(stake*(100/110 if outcome=="win" else -1 if outcome=="loss" else 0),2)
++  stake=round((day_start if day_staking else bank)*.01,2);pnl=round(stake*(r.get("payout",100/110) if outcome=="win" else -1 if outcome=="loss" else 0),2)
+   bank=round(bank+pnl,2);peak=max(peak,bank)
+   out.append({"date":r["date"],"game_id":r["game_id"],"market":r["market"],
+    "outcome":outcome,"edge":round(r["edge"],3),"stake":stake,"pnl":pnl})
+diff --git a/scripts/run_spread_total_holdout.py b/scripts/run_spread_total_holdout.py
+index 05479f2..2985fdc 100644
+--- a/scripts/run_spread_total_holdout.py
++++ b/scripts/run_spread_total_holdout.py
+@@ -6,24 +6,30 @@ import argparse,json,os
+ from pathlib import Path
+ from scripts.backtest_opening_spreads_totals import fetch,load
+ from scripts.holdout_spreads_totals import make,sim
++from v13.pricing import tip_times
+ def main():
+  p=argparse.ArgumentParser();p.add_argument("--predictions",required=True);p.add_argument("--out",required=True)
++ p.add_argument("--games",help="Game index with UTC 'datetime'; enables strict pre-tip line filter")
++ p.add_argument("--pricing",choices=("assumed110","actual"),default="assumed110")
+  a=p.parse_args();pred=load(a.predictions)
+  key=os.environ["BALLDONTLIE_API_KEY"]
+  odds=fetch([x["game_id"] for x in pred],key)
+- rows=make(pred,odds)
++ tips=tip_times(load(a.games)) if a.games else None
++ if tips is not None and not tips:raise RuntimeError("Games index has no tip times")
++ skipped={};rows=make(pred,odds,tips,a.pricing,skipped)
+  dates=sorted({r["date"] for r in rows});cutoff=dates[int(len(dates)*.65)]
+- report={"holdout_start":cutoff,"pricing":"assumed -110","market_lines":"historical opening","markets":{}}
++ report={"holdout_start":cutoff,"pricing":a.pricing,"pregame_filter":tips is not None,"skipped":skipped,
++  "staking":"1% of start-of-day bankroll","market_lines":"historical opening","markets":{}}
+  for market,thresholds in {"spread":[2,3,4,5,6,8],"total":[3,4,5,6,8,10]}.items():
+   tr=[r for r in rows if r["market"]==market and r["date"]<cutoff]
+   te=[r for r in rows if r["market"]==market and r["date"]>=cutoff]
+-  eligible=[(t,sim(tr,t)) for t in thresholds]
++  eligible=[(t,sim(tr,t,True)) for t in thresholds]
+   eligible=[(t,s) for t,s in eligible if s["bets"]>=40]
+   if not eligible:raise RuntimeError(f"No valid threshold for {market}")
+   threshold=max(eligible,key=lambda x:(x[1]["return_pct"],-x[1]["bets"]))[0]
+-  hold=sim(te,threshold)
++  hold=sim(te,threshold,True)
+   report["markets"][market]={"threshold":threshold,"train_rows":len(tr),"holdout_rows":len(te),
+-   "training":{k:v for k,v in sim(tr,threshold).items() if k!="ledger"},"holdout":hold}
++   "training":{k:v for k,v in sim(tr,threshold,True).items() if k!="ledger"},"holdout":hold}
+  out=Path(a.out);out.parent.mkdir(parents=True,exist_ok=True);out.write_text(json.dumps(report,indent=2)+"\n")
+  print(json.dumps({k:{**v,"holdout":{a:b for a,b in v["holdout"].items() if a!="ledger"}} for k,v in report["markets"].items()},indent=2))
+ if __name__=="__main__":main()
+diff --git a/tests/test_pricing_and_v2.py b/tests/test_pricing_and_v2.py
+new file mode 100644
+index 0000000..15e6900
+--- /dev/null
++++ b/tests/test_pricing_and_v2.py
+@@ -0,0 +1,179 @@
++import math
++import random
++
++import pytest
++
++from v13.pricing import (implied_probability, no_vig_pair, pregame_status, profit_per_unit,
++                         prop_prices, tip_times, wilson, game_price)
++from scripts.backtest_prop_holdout_v2 import evaluate, p_over, simulate, normalize_lines
++from scripts.audit_prop_ledger import audit
++from scripts.holdout_spreads_totals import make, sim
++from collections import Counter
++
++
++def test_price_math():
++    assert profit_per_unit(-110) == pytest.approx(100 / 110)
++    assert profit_per_unit(150) == pytest.approx(1.5)
++    assert implied_probability(-150) == pytest.approx(0.6)
++    a, b = no_vig_pair(-150, 120)
++    assert a + b == pytest.approx(1.0) and a > b
++    with pytest.raises(ValueError):
++        profit_per_unit(-50)
++
++
++def test_prop_prices_and_missing():
++    assert prop_prices({"market": {"type": "over_under", "over_odds": -140, "under_odds": 110}}) == (-140, 110)
++    assert prop_prices({"market": {"type": "over_under"}}) == (None, None)
++    assert prop_prices({"market": {"type": "milestone", "odds": 200}}) == (None, None)
++    assert game_price({"total_over_odds": "-115"}, "total", "over") == -115
++
++
++def test_pregame_status():
++    tips = tip_times([{"id": 7, "datetime": "2026-01-05T00:30:00Z"}])
++    assert pregame_status("2026-01-04T18:00:00Z", tips["7"]) == "pregame"
++    assert pregame_status("2026-01-05T00:30:00Z", tips["7"]) == "post_tip"  # at tip is not pregame
++    assert pregame_status("2026-01-05T01:00:00Z", tips["7"]) == "post_tip"
++    assert pregame_status(None, tips["7"]) == "unverifiable"
++    assert pregame_status("2026-01-04T18:00:00Z", None) == "unverifiable"
++
++
++def test_wilson_bounds():
++    lo, hi = wilson(599, 986)
++    assert 0.57 < lo < 0.58 and 0.63 < hi < 0.64
++
++
++def test_poisson_p_over():
++    # P(X > 1.5) for Poisson(2) = 1 - e^-2 (1 + 2)
++    assert p_over(2.0, 1.5, "threes", 1) == pytest.approx(1 - math.exp(-2) * 3)
++
++
++def line_row(gid, pid, line, opened, over=-110, under=-110, vendor="caesars", prop="threes", rid=1):
++    return {"id": rid, "game_id": gid, "player_id": pid, "vendor": vendor, "prop_type": prop,
++            "line_value": str(line), "opened_at": opened,
++            "market": {"type": "over_under", "over_odds": over, "under_odds": under}}
++
++
++def test_normalize_drops_post_tip_and_flags_conflicts():
++    tips = tip_times([{"id": 1, "datetime": "2026-01-05T00:00:00Z"}])
++    cov = Counter()
++    rows = [line_row(1, 9, 2.5, "2026-01-05T01:00:00Z", rid=1),  # after tip -> dropped
++            line_row(1, 9, 1.5, "2026-01-04T15:00:00Z", rid=2),
++            line_row(1, 9, 2.5, "2026-01-04T16:00:00Z", rid=3)]  # same vendor, different value
++    chosen = normalize_lines(rows, tips, cov)
++    assert chosen[("1", "9", "threes")][1] == 1.5  # earliest pregame row
++    assert cov["line_post_tip"] == 1 and cov["conflicting_line_values"] == 1
++
++
++def fair_american(p, vig=0.045):
++    """American price for true probability p with proportional vig."""
++    q = min(p * (1 + vig / 2), 0.97)
++    return int(round(-100 * q / (1 - q))) if q >= 0.5 else int(round(100 * (1 - q) / q))
++
++
++def synthetic_season(seed, n_days=120, players=40, juice_under=-110, priced=False):
++    """Players whose threes ~ Poisson(true rate); line = floor(rate)+0.5.
++
++    priced=False: both sides -110 (what a -110 backtest implicitly assumes).
++    priced=True: each side priced from the TRUE probability plus vig, like a sharp book.
++    """
++    rng = random.Random(seed)
++    rates = [rng.uniform(0.8, 3.5) for _ in range(players)]
++    games, features, lines = [], [], []
++    hist = {p: [] for p in range(players)}
++    gid = 0
++    for d in range(n_days):
++        day = f"2026-{1 + d // 28:02d}-{1 + d % 28:02d}"
++        gid += 1
++        games.append({"id": gid, "datetime": day + "T23:00:00Z"})
++        for p in range(players):
++            # Knuth Poisson draw
++            L, k, prod = math.exp(-rates[p]), 0, rng.random()
++            while prod > L:
++                k += 1; prod *= rng.random()
++            prior = hist[p]
++            if len(prior) >= 20:
++                f = {"player_id": p, "game_id": gid, "game_date": day, "history_games": len(prior)}
++                for m in ("points", "rebounds", "assists", "threes", "pra"):
++                    for w in (5, 10, 20):
++                        f[f"{m}_avg_{w}"] = sum(prior[-w:]) / w
++                    f[f"{m}_actual"] = k
++                features.append(f)
++                line = math.floor(rates[p]) + 0.5
++                over, under = -110, juice_under
++                if priced:
++                    po = p_over(rates[p], line, "threes", 1)
++                    over, under = fair_american(po), fair_american(1 - po)
++                lines.append(line_row(gid, p, line, day + "T15:00:00Z", over=over, under=under, rid=len(lines)))
++            hist[p].append(k)
++    return features, lines, games
++
++
++def test_symmetric_110_grading_manufactures_a_60pct_record():
++    """Mechanism check: half-point count lines graded at -110 on both sides look like 60%."""
++    features, lines, games = synthetic_season(1)
++    held = evaluate(features, lines, games, "actual")["markets"]["threes"]["edge"]["holdout"]
++    assert held["hit_rate"] > 0.57
++
++
++def test_v2_finds_no_profit_when_prices_reflect_true_probability():
++    features, lines, games = synthetic_season(1, priced=True)
++    threes = evaluate(features, lines, games, "actual")["markets"]["threes"]
++    assert threes["status"] == "evaluated"
++    for sel in ("edge", "ev"):
++        held = threes[sel].get("holdout")
++        if held and held["bets"] >= 100:
++            assert held["roi_on_turnover_pct"] < 8
++            assert held["vs_devigged_market"]["z"] < 2.5
++
++
++def test_heavy_under_juice_is_charged_not_ignored():
++    features, lines, games = synthetic_season(2, juice_under=-170)
++    actual = evaluate(features, lines, games, "actual")["markets"]["threes"]["edge"]
++    assumed = evaluate(features, lines, games, "assumed110")["markets"]["threes"]["edge"]
++    if actual.get("holdout") and assumed.get("holdout"):
++        a, b = actual["holdout"], assumed["holdout"]
++        if a["by_side"]["under"] and a["bets"] == b["bets"]:
++            assert a["roi_on_turnover_pct"] < b["roi_on_turnover_pct"]
++
++
++def test_day_start_staking_is_independent_of_same_day_order():
++    rows = [{"date": "2026-01-01", "game_id": str(i), "player_id": "1", "market": "threes", "line": 1.5,
++             "actual": a, "x": [1, 1, 1], "over_odds": -110, "under_odds": -110, "vendor": "caesars",
++             "opened_at": "x", "projection": 3.0} for i, a in enumerate([3, 0, 3])]
++    led = simulate(rows, "edge", 0.5, "actual", 1.0)["ledger"]
++    assert {x["stake"] for x in led} == {100.0}
++
++
++def test_ledger_audit_detects_post_tip_and_reprices():
++    games = [{"id": 1, "datetime": "2026-01-05T00:00:00Z"}, {"id": 2, "datetime": "2026-01-06T00:00:00Z"}]
++    lines = [line_row(1, 9, 1.5, "2026-01-04T12:00:00Z", over=120, under=-160),
++             line_row(2, 9, 1.5, "2026-01-06T02:00:00Z", over=120, under=-160, rid=2)]
++    ledger = [{"date": "2026-01-04", "game_id": 1, "player_id": 9, "market": "threes", "line": 1.5,
++               "projection": 0.8, "side": "under", "outcome": "win"},
++              {"date": "2026-01-05", "game_id": 2, "player_id": 9, "market": "threes", "line": 1.5,
++               "projection": 0.8, "side": "under", "outcome": "win"}]
++    report = {"markets": {"threes": {"ridge_holdout_ledger": ledger}}}
++    out = audit(report, lines, games, "threes")
++    assert out["by_timing"]["post_tip"]["bets"] == 1
++    assert out["pregame_verified_only"]["bets"] == 1
++    o = out["overall"]
++    assert o["roi_flat_at_actual_price_pct"] < o["roi_flat_at_assumed_110_pct"]
++
++
++def test_spread_total_actual_prices_and_pregame_filter():
++    preds = [{"game_id": 1, "date": "2026-01-04", "predicted_home_margin": 10, "actual_home_margin": 8,
++              "predicted_total": 230, "actual_total": 210}]
++    odds = [{"game_id": 1, "vendor": "draftkings", "opened_at": "2026-01-04T10:00:00Z",
++             "spread_home_value": "-3.5", "spread_home_odds": -125, "spread_away_odds": 105,
++             "total_value": "220.5", "total_over_odds": -105, "total_under_odds": -115}]
++    tips = tip_times([{"id": 1, "datetime": "2026-01-05T00:00:00Z"}])
++    rows = make(preds, odds, tips, "actual")
++    spread = [r for r in rows if r["market"] == "spread"][0]
++    total = [r for r in rows if r["market"] == "total"][0]
++    assert spread["price"] == -125 and total["price"] == -105
++    late = [dict(odds[0], opened_at="2026-01-05T01:00:00Z")]
++    assert make(preds, late, tips, "actual") == []
++    legacy = make(preds, odds)
++    assert all(r["price"] == -110 for r in legacy)
++    res = sim([dict(spread)], 1, True)
++    assert res["wins"] == 1 and res["ending_bankroll"] == pytest.approx(10080.0)
+diff --git a/v13/pricing.py b/v13/pricing.py
+new file mode 100644
+index 0000000..1370e74
+--- /dev/null
++++ b/v13/pricing.py
+@@ -0,0 +1,110 @@
++"""Real sportsbook price handling and point-in-time line guards.
++
++BALLDONTLIE v2 opening records carry actual American prices:
++  player props: row["market"] = {"type": "over_under", "over_odds": int, "under_odds": int}
++  game odds:    spread_home_odds, spread_away_odds, total_over_odds, total_under_odds
++Historical backtests must grade at these prices. -110 is only a labelled fallback.
++"""
++import math
++from datetime import datetime, timezone
++
++ASSUMED_110 = -110
++
++
++def _american(value):
++    """Return a valid American price as int, or None."""
++    if value is None or isinstance(value, bool):
++        return None
++    try:
++        odds = float(value)
++    except (TypeError, ValueError):
++        return None
++    if not math.isfinite(odds) or -100 < odds < 100:
++        return None
++    return int(round(odds))
++
++
++def profit_per_unit(odds):
++    """Profit on a 1-unit winning stake at American odds."""
++    odds = _american(odds)
++    if odds is None:
++        raise ValueError("Invalid American odds")
++    return odds / 100.0 if odds > 0 else 100.0 / abs(odds)
++
++
++def implied_probability(odds):
++    """Break-even win probability at American odds (includes vig)."""
++    return 1.0 / (1.0 + profit_per_unit(odds))
++
++
++def no_vig_pair(odds_a, odds_b):
++    """Multiplicatively de-vigged probabilities for a two-way market."""
++    a, b = implied_probability(odds_a), implied_probability(odds_b)
++    total = a + b
++    return a / total, b / total
++
++
++def prop_prices(row):
++    """(over_odds, under_odds) from a BALLDONTLIE prop record, or (None, None)."""
++    market = row.get("market") or {}
++    if market.get("type") != "over_under":
++        return None, None
++    return _american(market.get("over_odds")), _american(market.get("under_odds"))
++
++
++GAME_PRICE_FIELDS = {
++    ("spread", "home"): "spread_home_odds",
++    ("spread", "away"): "spread_away_odds",
++    ("total", "over"): "total_over_odds",
++    ("total", "under"): "total_under_odds",
++}
++
++
++def game_price(row, market, side):
++    return _american(row.get(GAME_PRICE_FIELDS[(market, side)]))
++
++
++def game_price_pair(row, market):
++    sides = ("home", "away") if market == "spread" else ("over", "under")
++    return tuple(game_price(row, market, s) for s in sides)
++
++
++def parse_utc(value):
++    if not value:
++        return None
++    try:
++        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
++    except ValueError:
++        return None
++    if stamp.tzinfo is None:
++        return None
++    return stamp.astimezone(timezone.utc)
++
++
++def tip_times(games):
++    """game_id -> UTC tip time from BALLDONTLIE game 'datetime' field."""
++    out = {}
++    for g in games:
++        stamp = parse_utc(g.get("datetime"))
++        if stamp is not None and g.get("id") is not None:
++            out[str(g["id"])] = stamp
++    return out
++
++
++def pregame_status(opened_at, tip):
++    """'pregame', 'post_tip', or 'unverifiable' for a line timestamp."""
++    opened = parse_utc(opened_at)
++    if opened is None or tip is None:
++        return "unverifiable"
++    return "pregame" if opened < tip else "post_tip"
++
++
++def wilson(wins, n, z=1.96):
++    """95% Wilson interval for a win rate."""
++    if n == 0:
++        return None, None
++    p = wins / n
++    denom = 1 + z * z / n
++    centre = (p + z * z / (2 * n)) / denom
++    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
++    return round(centre - half, 4), round(centre + half, 4)
+-- 
+2.43.0
+
+
+From 923095bcc62d89f435a715f10a9383f3430fae02 Mon Sep 17 00:00:00 2001
+From: Claude audit <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 15:20:23 -0500
+Subject: [PATCH 2/4] Round 3: possession ratings, game model v2, universal
+ cross-market ranking and staking engine
+
+- v13/team_ratings.py: point-in-time possessions, Four Factors, decayed opponent-adjusted ridge ratings
+- v13/schedule_travel.py: rest, density, travel distance, timezone shift, altitude
+- scripts/game_model_v2.py: direct and market-residual spread/total models, monthly walk-forward, MSE vs market
+- scripts/collect_opening_game_odds.py: raw opening game odds with prices per season
+- v13/ranking.py + scripts/rank_and_stake.py: model+market logistic blend per market, EV at lower-bound probability,
+  correlation/exposure limits, validation-frozen cutoffs for 100-300 bets, flat vs quarter-Kelly tiers, Monte Carlo
+- scripts/export_prop_candidates.py: walk-forward two-sided prop candidates in the universal schema
+- workflow round3-cross-market.yml; tests incl. efficient-market (no bets) and planted-inefficiency (found) checks
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ scripts/collect_opening_game_odds.py |  34 ++++
+ scripts/export_prop_candidates.py    | 100 +++++++++
+ scripts/game_model_v2.py             | 184 +++++++++++++++++
+ scripts/rank_and_stake.py            |  94 +++++++++
+ tests/test_ranking_and_game_v2.py    | 200 ++++++++++++++++++
+ v13/ranking.py                       | 294 +++++++++++++++++++++++++++
+ v13/schedule_travel.py               |  70 +++++++
+ v13/team_ratings.py                  | 183 +++++++++++++++++
+ 8 files changed, 1159 insertions(+)
+ create mode 100644 scripts/collect_opening_game_odds.py
+ create mode 100644 scripts/export_prop_candidates.py
+ create mode 100644 scripts/game_model_v2.py
+ create mode 100644 scripts/rank_and_stake.py
+ create mode 100644 tests/test_ranking_and_game_v2.py
+ create mode 100644 v13/ranking.py
+ create mode 100644 v13/schedule_travel.py
+ create mode 100644 v13/team_ratings.py
+
+diff --git a/scripts/collect_opening_game_odds.py b/scripts/collect_opening_game_odds.py
+new file mode 100644
+index 0000000..b05b3e4
+--- /dev/null
++++ b/scripts/collect_opening_game_odds.py
+@@ -0,0 +1,34 @@
++"""Save raw BALLDONTLIE opening spread/total/moneyline records (with prices) for one season.
++
++Keeps every vendor row unchanged so later scripts can apply pre-tip and vendor rules.
++python -m scripts.collect_opening_game_odds --games research_data/game_history/games_2024.jsonl \
++    --out research_data/game_odds/opening_2024.jsonl
++"""
++import argparse, json, os
++from collections import Counter
++from pathlib import Path
++
++from scripts.backtest_opening_spreads_totals import fetch, load
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--games", required=True); p.add_argument("--out", required=True)
++    a = p.parse_args()
++    key = os.environ.get("BALLDONTLIE_API_KEY")
++    if not key:
++        raise RuntimeError("BALLDONTLIE_API_KEY not set")
++    games = [g for g in load(a.games) if g.get("postseason") is False]
++    rows = fetch([g["id"] for g in games], key)
++    out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
++    out.write_text("".join(json.dumps(r) + "\n" for r in rows))
++    with_prices = sum(r.get("spread_home_odds") is not None and r.get("total_over_odds") is not None for r in rows)
++    manifest = {"games": len(games), "rows": len(rows), "games_with_rows": len({str(r.get('game_id')) for r in rows}),
++                "rows_with_spread_and_total_prices": with_prices,
++                "vendors": Counter(str(r.get("vendor")) for r in rows)}
++    (out.parent / (out.stem + "_manifest.json")).write_text(json.dumps(manifest, indent=2) + "\n")
++    print(json.dumps(manifest, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/export_prop_candidates.py b/scripts/export_prop_candidates.py
+new file mode 100644
+index 0000000..0ca321c
+--- /dev/null
++++ b/scripts/export_prop_candidates.py
+@@ -0,0 +1,100 @@
++"""Export out-of-sample player-prop candidates (both sides) in the universal ranking schema.
++
++Walk-forward: for each calendar month, the per-market Ridge projection is fitted only on
++rows dated before that month (across all supplied seasons). Lines must be pre-tip and
++carry real two-sided prices (v2 rules). Probabilities: Poisson for count markets,
++normal (training-residual sigma) for points/PRA. This is the BASELINE probability model;
++better models (minutes, negative binomial) plug in by replacing `probability()`.
++
++python -m scripts.export_prop_candidates \
++  --season 2025 --features props_2025.jsonl --lines opening_props_2025.jsonl --games games_2025.jsonl \
++  [--season 2024 --features ... --lines ... --games ...] --out research_results/candidates/props.jsonl
++"""
++import argparse, json, math
++from collections import Counter
++from pathlib import Path
++
++from scripts.backtest_prop_holdout_v2 import COUNT_MARKETS, dataset, fit, read
++from v13.pricing import tip_times
++
++
++def poisson_pmf(k, mu):
++    return math.exp(-mu + k * math.log(mu) - math.lgamma(k + 1)) if k >= 0 else 0.0
++
++
++def probability(proj, line, market, sigma):
++    """(P(over), P(push)) for one line."""
++    mu = max(proj, 1e-6)
++    if market in COUNT_MARKETS:
++        k = math.floor(line)
++        cdf = sum(poisson_pmf(i, mu) for i in range(k + 1))
++        push = poisson_pmf(int(line), mu) if float(line).is_integer() else 0.0
++        over = 1 - cdf
++        return over, push
++    z_hi = (line + 0.5 - mu) / sigma if float(line).is_integer() else (line - mu) / sigma
++    over = 0.5 * math.erfc(z_hi / math.sqrt(2))
++    push = 0.0
++    if float(line).is_integer():
++        z_lo = (line - 0.5 - mu) / sigma
++        push = 0.5 * math.erfc(z_lo / math.sqrt(2)) - over
++    return over, push
++
++
++def export(seasons):
++    rows, coverage = [], Counter()
++    for s in seasons:
++        cov = Counter()
++        for r in dataset(s["features"], s["lines"], tip_times(s["games"]), cov):
++            if r["over_odds"] is None or r["under_odds"] is None:
++                cov["missing_price"] += 1
++                continue
++            rows.append({**r, "season": s["season"]})
++        coverage.update({f"{s['season']}_{k}": v for k, v in cov.items()})
++    rows.sort(key=lambda r: r["date"])
++    out = []
++    for market in sorted({r["market"] for r in rows}):
++        sub = [r for r in rows if r["market"] == market]
++        for month in sorted({r["date"][:7] for r in sub}):
++            train = [r for r in sub if r["date"][:7] < month]
++            test = [r for r in sub if r["date"][:7] == month]
++            if len(train) < 500:
++                coverage[f"{market}_{month}_skipped_burn_in"] += len(test)
++                continue
++            predictor, sigma = fit(train)
++            for r, proj in zip(test, predictor(test)):
++                over, push = probability(proj, r["line"], market, sigma)
++                no_push = max(1 - push, 1e-9)
++                delta = r["actual"] - r["line"]
++                for side, price, opp, p_side in (("over", r["over_odds"], r["under_odds"], over),
++                                                 ("under", r["under_odds"], r["over_odds"], 1 - over - push)):
++                    outcome = "push" if abs(delta) < 1e-9 else ("win" if (delta > 0) == (side == "over") else "loss")
++                    out.append({"candidate_id": f"{r['game_id']}:{r['player_id']}:{market}:{side}",
++                                "season": r["season"], "date": r["date"], "game_id": r["game_id"],
++                                "player_id": r["player_id"], "market": f"prop_{market}", "side": side,
++                                "line": r["line"], "price": price, "opp_price": opp,
++                                "p_model": min(max(p_side / no_push, 1e-4), 1 - 1e-4), "p_push": push,
++                                "projection": round(proj, 3), "model_version": "ridge_rolling_poisson_v1",
++                                "vendor": r["vendor"], "opened_at": r["opened_at"], "outcome": outcome})
++    return out, dict(coverage)
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--season", type=int, action="append", required=True)
++    p.add_argument("--features", action="append", required=True)
++    p.add_argument("--lines", action="append", required=True)
++    p.add_argument("--games", action="append", required=True)
++    p.add_argument("--out", required=True)
++    a = p.parse_args()
++    if not len(a.season) == len(a.features) == len(a.lines) == len(a.games):
++        raise SystemExit("Give --season/--features/--lines/--games once per season, in the same order")
++    seasons = [{"season": s, "features": read(f), "lines": read(l), "games": read(g)}
++               for s, f, l, g in zip(a.season, a.features, a.lines, a.games)]
++    cands, coverage = export(seasons)
++    out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
++    out.write_text("".join(json.dumps(c) + "\n" for c in cands))
++    print(json.dumps({"candidates": len(cands), "by_market": Counter(c["market"] for c in cands), "coverage": coverage}, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/game_model_v2.py b/scripts/game_model_v2.py
+new file mode 100644
+index 0000000..ac32f0b
+--- /dev/null
++++ b/scripts/game_model_v2.py
+@@ -0,0 +1,184 @@
++"""Spread and total models v2: possession-based ratings + market-residual, walk-forward.
++
++Three model families are exported as universal-schema candidates so the ranking engine
++and the reports compare them on identical games:
++
++  direct   : P from the ratings projection alone (margin ~ N(proj_margin, sd)).
++  residual : Ridge on (actual - market) using (projection - market), rest, travel,
++             altitude and Four Factors matchup features; P from N(market + r_hat, sd).
++  market   : the de-vigged opening price itself (zero-edge benchmark; never selected).
++
++Every fit uses only games dated before the month being scored. Lines must be opened
++before tip and carry real prices; anything else is excluded and counted.
++
++python -m scripts.game_model_v2 \
++  --games games_2023.jsonl --games games_2024.jsonl --games games_2025.jsonl \
++  --stats regular_players_2023.jsonl --stats regular_players_2024.jsonl --stats regular_players_2025.jsonl \
++  --odds opening_2023.jsonl --odds opening_2024.jsonl --odds opening_2025.jsonl \
++  --out-candidates research_results/candidates/games.jsonl --out-report research_results/game_model_v2/report.json
++"""
++import argparse, json, math
++from collections import Counter, defaultdict
++from pathlib import Path
++
++import numpy as np
++
++from scripts.backtest_opening_spreads_totals import choose
++from v13.pricing import game_price_pair, no_vig_pair, tip_times
++from v13.schedule_travel import schedule_travel_features
++from v13.team_ratings import pregame_projections
++
++RIDGE_ALPHA = 50.0
++MIN_TRAIN = 300
++
++
++def read(path):
++    return [json.loads(x) for x in Path(path).open() if x.strip()]
++
++
++def _f(row, key, default=0.0):
++    v = row.get(key)
++    return default if v is None else float(v)
++
++
++FEATURE_NAMES = {
++    "spread": ["proj_minus_market", "rest_diff", "home_b2b", "away_b2b", "away_travel_1000km", "away_abs_tz_shift",
++               "away_at_altitude", "efg_matchup_diff", "tov_rate_diff", "orb_rate_diff"],
++    "total": ["proj_minus_market", "b2b_count", "away_at_altitude", "three_rate_sum", "ft_rate_sum", "orb_rate_sum"],
++}
++
++
++def residual_features(market, r):
++    if market == "spread":
++        return [r["proj_margin"] - r["market_value"],
++                _f(r, "rest_diff"), _f(r, "home_b2b"), _f(r, "away_b2b"),
++                _f(r, "away_travel_km") / 1000, abs(_f(r, "away_tz_shift")), _f(r, "away_at_altitude"),
++                _f(r, "home_ff_efg") - _f(r, "away_ff_allowed_efg") - (_f(r, "away_ff_efg") - _f(r, "home_ff_allowed_efg")),
++                _f(r, "home_ff_tov_rate") - _f(r, "away_ff_tov_rate"),
++                _f(r, "home_ff_orb_rate") - _f(r, "away_ff_orb_rate")]
++    return [r["proj_total"] - r["market_value"],
++            _f(r, "home_b2b") + _f(r, "away_b2b"), _f(r, "away_at_altitude"),
++            _f(r, "home_ff_three_rate") + _f(r, "away_ff_three_rate"),
++            _f(r, "home_ff_ft_rate") + _f(r, "away_ff_ft_rate"),
++            _f(r, "home_ff_orb_rate") + _f(r, "away_ff_orb_rate")]
++
++
++def build_rows(games, stats, odds):
++    proj = {p["game_id"]: p for p in pregame_projections(games, stats)}
++    sched = schedule_travel_features(games)
++    lines = choose(odds, tip_times(games))
++    coverage, rows = Counter(), []
++    for gid, p in proj.items():
++        o = lines.get(gid)
++        if o is None:
++            coverage["no_pregame_line"] += 1; continue
++        if "actual_margin" not in p:
++            coverage["no_result"] += 1; continue
++        for market in ("spread", "total"):
++            raw = o.get("spread_home_value" if market == "spread" else "total_value")
++            prices = game_price_pair(o, market)
++            if raw is None or None in prices:
++                coverage[f"{market}_missing_line_or_price"] += 1; continue
++            line = float(raw)
++            market_value = -line if market == "spread" else line  # implied home margin / total
++            rows.append({**p, **sched.get(gid, {}), "market": market, "line": line, "market_value": market_value,
++                         "price_a": prices[0], "price_b": prices[1], "vendor": o.get("vendor"),
++                         "opened_at": o.get("opened_at"),
++                         "actual": p["actual_margin"] if market == "spread" else p["actual_total"]})
++    return sorted(rows, key=lambda r: (r["date"], r["game_id"], r["market"])), coverage
++
++
++def normal_sides(mean, threshold, sd, integer_line):
++    """P(X > threshold), P(push) for X ~ N(mean, sd) graded on a (possibly integer) line."""
++    def above(t): return 0.5 * math.erfc((t - mean) / (sd * math.sqrt(2)))
++    if integer_line:
++        p_over, p_push = above(threshold + 0.5), above(threshold - 0.5) - above(threshold + 0.5)
++    else:
++        p_over, p_push = above(threshold), 0.0
++    return p_over, p_push
++
++
++def candidates_for(r, mean, sd, version):
++    integer = float(r["line"]).is_integer()
++    p_a, push = normal_sides(mean, r["market_value"], sd, integer)
++    no_push = max(1 - push, 1e-9)
++    sides = ("home", "away") if r["market"] == "spread" else ("over", "under")
++    diff = r["actual"] - r["market_value"]
++    out = []
++    for side, price, opp, p in ((sides[0], r["price_a"], r["price_b"], p_a), (sides[1], r["price_b"], r["price_a"], 1 - p_a - push)):
++        outcome = "push" if abs(diff) < 1e-9 else ("win" if (diff > 0) == (side == sides[0]) else "loss")
++        out.append({"candidate_id": f"{r['game_id']}:{r['market']}:{side}:{version}", "season": r.get("season"),
++                    "date": r["date"], "game_id": r["game_id"], "player_id": None, "market": r["market"],
++                    "model_version": version, "side": side, "line": r["line"], "price": price, "opp_price": opp,
++                    "p_model": min(max(p / no_push, 1e-4), 1 - 1e-4), "p_push": push, "outcome": outcome,
++                    "vendor": r["vendor"], "opened_at": r["opened_at"]})
++    return out
++
++
++def ridge_fit(X, y, alpha=RIDGE_ALPHA):
++    mu, sd = X.mean(axis=0), X.std(axis=0)
++    sd[sd < 1e-9] = 1
++    Z = (X - mu) / sd
++    Z1 = np.hstack([np.ones((len(Z), 1)), Z])
++    pen = np.eye(Z1.shape[1]) * alpha; pen[0, 0] = 0
++    beta = np.linalg.solve(Z1.T @ Z1 + pen, Z1.T @ y)
++    return lambda Xn: np.hstack([np.ones((len(Xn), 1)), (Xn - mu) / sd]) @ beta, beta
++
++
++def run(rows):
++    cands, report = [], {"markets": {}}
++    for market in ("spread", "total"):
++        sub = [r for r in rows if r["market"] == market]
++        err = defaultdict(list)
++        coefs = {}
++        for month in sorted({r["date"][:7] for r in sub}):
++            train = [r for r in sub if r["date"][:7] < month]
++            test = [r for r in sub if r["date"][:7] == month]
++            if len(train) < MIN_TRAIN:
++                continue
++            key = "proj_margin" if market == "spread" else "proj_total"
++            direct_sd = float(np.std([r["actual"] - r[key] for r in train]))
++            X = np.array([residual_features(market, r) for r in train])
++            y = np.array([r["actual"] - r["market_value"] for r in train])
++            predict, beta = ridge_fit(X, y)
++            resid_sd = float(np.std(y - predict(X)))
++            coefs[month] = [round(float(b), 4) for b in beta]
++            r_hat = predict(np.array([residual_features(market, r) for r in test]))
++            for r, rh in zip(test, r_hat):
++                mean_resid = r["market_value"] + float(rh)
++                cands += candidates_for(r, r[key], direct_sd, "direct_v2")
++                cands += candidates_for(r, mean_resid, resid_sd, "residual_v2")
++                season = str(r.get("season"))
++                err[(season, "market")].append((r["actual"] - r["market_value"]) ** 2)
++                err[(season, "direct")].append((r["actual"] - r[key]) ** 2)
++                err[(season, "residual")].append((r["actual"] - mean_resid) ** 2)
++        report["markets"][market] = {
++            "out_of_sample_mse": {f"{s}_{m}": round(float(np.mean(v)), 3) for (s, m), v in sorted(err.items())},
++            "out_of_sample_games": {s: len(v) for (s, m), v in sorted(err.items()) if m == "market"},
++            "residual_coefficients_last_fit": coefs[max(coefs)] if coefs else None,
++            "feature_order": ["intercept"] + FEATURE_NAMES[market],
++            "reading_guide": "A model adds information only if its MSE is below the market's in every season."}
++    return cands, report
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--games", action="append", required=True)
++    p.add_argument("--stats", action="append", required=True)
++    p.add_argument("--odds", action="append", required=True)
++    p.add_argument("--out-candidates", required=True); p.add_argument("--out-report", required=True)
++    a = p.parse_args()
++    games = [g for path in a.games for g in read(path) if g.get("postseason") is False]
++    stats = [s for path in a.stats for s in read(path)]
++    odds = [o for path in a.odds for o in read(path)]
++    rows, coverage = build_rows(games, stats, odds)
++    cands, report = run(rows)
++    report["coverage"] = dict(coverage); report["rows"] = len(rows)
++    for path, content in ((a.out_candidates, "".join(json.dumps(c) + "\n" for c in cands)),
++                          (a.out_report, json.dumps(report, indent=2) + "\n")):
++        Path(path).parent.mkdir(parents=True, exist_ok=True); Path(path).write_text(content)
++    print(json.dumps(report, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/rank_and_stake.py b/scripts/rank_and_stake.py
+new file mode 100644
+index 0000000..cc2d5fc
+--- /dev/null
++++ b/scripts/rank_and_stake.py
+@@ -0,0 +1,94 @@
++"""Cross-market selection, bet-count sweep and staking comparison on universal candidates.
++
++1. Walk-forward scoring: each month's candidates are scored with per-market calibrators
++   (model + de-vigged market blend) fitted only on earlier months.
++2. For each target count N, the EV cutoff is chosen on the VALIDATION season's scored
++   candidates, then frozen and applied to the TEST season.
++3. Flat 1% and quarter-Kelly tiers (1/2/3%) are simulated on the same frozen selections,
++   with day-start staking and a day-bootstrap Monte Carlo.
++
++python -m scripts.rank_and_stake --candidates props.jsonl --candidates games.jsonl \
++    --models residual_v2,ridge_rolling_poisson_v1 --validation-season 2024 --test-season 2025 \
++    --out research_results/ranking/report.json
++"""
++import argparse, json
++from collections import Counter
++from pathlib import Path
++
++from v13.ranking import monte_carlo, reliability, select, simulate, tau_for_target, walk_forward_score
++
++TARGETS = (100, 150, 200, 250, 300)
++
++
++def read(path):
++    return [json.loads(x) for x in Path(path).open() if x.strip()]
++
++
++def run(candidates, validation_season=None, test_season=None, models=None, targets=TARGETS, mc_paths=10000,
++        split_date=None):
++    """Seasons mode (preferred) or, when only one season has lines, split_date mode:
++    validation = scored candidates before split_date, test = on/after it (counts scale with window length)."""
++    if models:
++        candidates = [c for c in candidates if c.get("model_version") in models]
++    scored, fits = walk_forward_score(candidates)
++    if split_date:
++        pool = [c for c in scored if test_season is None or c.get("season") == test_season]
++        val = [c for c in pool if c["date"] < split_date]
++        test = [c for c in pool if c["date"] >= split_date]
++    else:
++        val = [c for c in scored if c.get("season") == validation_season]
++        test = [c for c in scored if c.get("season") == test_season]
++    if not val or not test:
++        raise RuntimeError(f"Need scored candidates in both seasons (validation {len(val)}, test {len(test)})")
++    scale = 1.0
++    if split_date:
++        days = lambda rows: len({c["date"] for c in rows})
++        scale = days(val) / max(days(test), 1)
++    report = {"validation_season": validation_season, "test_season": test_season, "split_date": split_date,
++              "validation_to_test_day_ratio": round(scale, 3),
++              "scored_candidates": dict(Counter(c["market"] for c in scored)),
++              "calibration_fits_last_period": fits[max(fits)],
++              "reliability_test": {m: reliability([c for c in test if c["market"] == m])
++                                   for m in sorted({c["market"] for c in test})},
++              "sweep": {}}
++    for n in targets:
++        tau = tau_for_target(val, max(1, round(n * scale)) if split_date else n)
++        chosen = select(test, tau)
++        flat, tiered = simulate(chosen, "flat"), simulate(chosen, "tiered")
++        report["sweep"][str(n)] = {
++            "ev_lo_cutoff_from_validation": round(tau, 5),
++            "validation_count": len(select(val, tau)),
++            "test": {"flat_1pct": {k: v for k, v in flat.items() if k != "ledger"},
++                     "tiered": {k: v for k, v in tiered.items() if k != "ledger"},
++                     "monte_carlo_flat": monte_carlo(flat["ledger"], "flat", mc_paths),
++                     "monte_carlo_tiered": monte_carlo(tiered["ledger"], "tiered", mc_paths)},
++            "test_ledger_flat": flat["ledger"]}
++    return report
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--candidates", action="append", required=True)
++    p.add_argument("--models", help="comma-separated model_version values to include")
++    p.add_argument("--validation-season", type=int)
++    p.add_argument("--test-season", type=int)
++    p.add_argument("--split-date", help="YYYY-MM-DD; single-season mode (weaker, exploratory)")
++    p.add_argument("--mc-paths", type=int, default=10000)
++    p.add_argument("--out", required=True)
++    a = p.parse_args()
++    cands = [c for path in a.candidates for c in read(path)]
++    models = set(a.models.split(",")) if a.models else None
++    if not a.split_date and (a.validation_season is None or a.test_season is None):
++        raise SystemExit("Give --validation-season and --test-season, or --split-date")
++    report = run(cands, a.validation_season, a.test_season, models, mc_paths=a.mc_paths, split_date=a.split_date)
++    out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
++    out.write_text(json.dumps(report, indent=2, default=str) + "\n")
++    brief = {k: v for k, v in report.items() if k != "sweep"}
++    brief["sweep"] = {n: {"cutoff": s["ev_lo_cutoff_from_validation"], "validation_count": s["validation_count"],
++                          **{k: {kk: vv for kk, vv in s["test"][k].items() if kk not in ("by_tier", "by_market")}
++                             for k in ("flat_1pct", "tiered")}} for n, s in report["sweep"].items()}
++    print(json.dumps(brief, indent=2, default=str))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_ranking_and_game_v2.py b/tests/test_ranking_and_game_v2.py
+new file mode 100644
+index 0000000..7575b7c
+--- /dev/null
++++ b/tests/test_ranking_and_game_v2.py
+@@ -0,0 +1,200 @@
++import math
++import random
++from datetime import date, timedelta
++
++import pytest
++
++from v13.team_ratings import RatingModel, game_records, possessions, pregame_projections
++from v13.schedule_travel import schedule_travel_features
++from v13.ranking import Calibrator, kelly_tier, prepare, select, simulate, walk_forward_score, tau_for_target
++from scripts.game_model_v2 import build_rows, run as run_games, normal_sides
++from scripts.rank_and_stake import run as rank_run
++
++ABBR = ["BOS", "DEN", "LAL", "MIA", "CHI", "PHX", "NYK", "OKC"]
++
++
++def synth_league(seed=0, seasons=(2024, 2025), days=150, teams=8, b2b_penalty=0.0):
++    """Teams with true offence/defence/pace; box scores consistent with the score.
++
++    b2b_penalty: points per 100 a team loses on the second night of a back-to-back,
++    which the synthetic MARKET ignores (a planted, learnable inefficiency)."""
++    rng = random.Random(seed)
++    off = [rng.gauss(0, 4) for _ in range(teams)]
++    dfn = [rng.gauss(0, 4) for _ in range(teams)]
++    pace = [rng.gauss(0, 2) for _ in range(teams)]
++    games, stats, odds = [], [], []
++    gid = 0
++    for season in seasons:
++        for d in range(days):
++            day = (date(season, 10, 22) + timedelta(days=d)).isoformat()
++            order = list(range(teams)); rng.shuffle(order)
++            if b2b_penalty and d % 2 == 1:
++                order = prev_order[:]  # same teams play again tomorrow -> everyone on a back-to-back
++                order = order[1::2] + order[0::2]  # swap home/away pairs
++            prev_order = order
++            for i in range(0, teams, 2):
++                h, a = order[i], order[i + 1]
++                gid += 1
++                exp_poss = 99 + pace[h] + pace[a]
++                poss = exp_poss + rng.gauss(0, 3)
++                fatigue = b2b_penalty if (b2b_penalty and d % 2 == 1) else 0.0
++                hp = round(poss * (114 + 2.5 + off[h] - dfn[a] - fatigue + rng.gauss(0, 11)) / 100)
++                ap = round(poss * (114 + off[a] - dfn[h] - fatigue + rng.gauss(0, 11)) / 100)
++                if hp == ap: hp += 1
++                g = {"id": gid, "date": day, "datetime": day + "T23:30:00Z", "season": season, "status": "Final",
++                     "postseason": False, "home_team": {"id": h + 1, "abbreviation": ABBR[h]},
++                     "visitor_team": {"id": a + 1, "abbreviation": ABBR[a]},
++                     "home_team_score": hp, "visitor_team_score": ap}
++                games.append(g)
++                for team, pts in ((h, hp), (a, ap)):
++                    fga = round(poss * 0.88); fta = round(poss * 0.25)
++                    stats.append({"min": "240:00", "pts": pts, "fga": fga, "fgm": round(fga * 0.47), "fg3a": round(fga * 0.4),
++                                  "fg3m": round(fga * 0.145), "fta": fta, "ftm": round(fta * 0.78), "oreb": 10, "dreb": 33,
++                                  "turnover": round(poss - fga + 10 - 0.44 * fta), "team": {"id": team + 1}, "game": {"id": gid}})
++                # A market that knows the true ratings (efficient line), standard -110 both sides
++                true_margin = exp_poss * (2.5 + off[h] - dfn[a] - off[a] + dfn[h]) / 100
++                true_total = exp_poss * (228 + 2.5 + off[h] - dfn[a] + off[a] - dfn[h]) / 100
++                odds.append({"id": gid, "game_id": gid, "vendor": "draftkings", "opened_at": day + "T15:00:00Z",
++                             "spread_home_value": str(-round(true_margin * 2) / 2), "spread_home_odds": -110,
++                             "spread_away_odds": -110, "total_value": str(round(true_total * 2) / 2),
++                             "total_over_odds": -110, "total_under_odds": -110})
++    return games, stats, odds, (off, dfn, pace)
++
++
++def test_possessions_formula():
++    assert possessions({"fga": 88, "oreb": 10, "turnover": 13, "fta": 25}) == pytest.approx(88 - 10 + 13 + 11)
++
++
++def test_ratings_recover_true_strength_and_use_only_past():
++    games, stats, _, (off, dfn, _) = synth_league()
++    recs = game_records(games, stats)
++    model = RatingModel(half_life_days=400).fit(recs, "2026-12-31")
++    est = [model.rating(str(i + 1))[0] + model.rating(str(i + 1))[1] for i in range(len(off))]
++    true = [o + d for o, d in zip(off, dfn)]
++    corr = sum((e - sum(est) / 8) * (t - sum(true) / 8) for e, t in zip(est, true))
++    assert corr > 0  # net ratings line up with truth
++    projs = pregame_projections(games[:200], stats)
++    first_day = projs[0]["date"]
++    assert all(r["date"] >= first_day for r in projs)
++    # changing a FUTURE game's score must not change an earlier projection
++    altered = [dict(g) for g in games[:200]]
++    altered[-1]["home_team_score"] += 50
++    again = {p["game_id"]: p["proj_margin"] for p in pregame_projections(altered, stats)}
++    for p in projs:
++        if p["date"] < altered[-1]["date"]:
++            assert again[p["game_id"]] == pytest.approx(p["proj_margin"])
++
++
++def test_schedule_travel():
++    games = [{"id": 1, "date": "2026-01-01", "home_team": {"id": 1, "abbreviation": "BOS"}, "visitor_team": {"id": 2, "abbreviation": "DEN"}},
++             {"id": 2, "date": "2026-01-02", "home_team": {"id": 2, "abbreviation": "DEN"}, "visitor_team": {"id": 1, "abbreviation": "BOS"}}]
++    f = schedule_travel_features(games)
++    assert f["2"]["away_b2b"] == 1 and f["2"]["home_b2b"] == 1
++    assert 2700 < f["2"]["away_travel_km"] < 3100
++    assert f["2"]["away_at_altitude"] == 1 and f["2"]["away_tz_shift"] == -2
++
++
++def test_normal_sides_push():
++    over, push = normal_sides(0.0, 0.0, 10.0, True)
++    assert over == pytest.approx((1 - push) / 2) and 0.03 < push < 0.05
++
++
++def test_efficient_market_gives_no_profitable_game_bets():
++    games, stats, odds, _ = synth_league(1)
++    rows, cov = build_rows(games, stats, odds)
++    cands, report = run_games(rows)
++    assert cands and report["markets"]["spread"]["out_of_sample_mse"]
++    scored, _ = walk_forward_score([c for c in cands if c["model_version"] == "residual_v2"])
++    chosen = select(scored, 0.0)
++    if len(chosen) >= 50:
++        res = simulate(chosen, "flat")
++        assert res["roi_on_turnover_pct"] < 5  # market knew the truth; no durable edge
++
++
++def _cand(i, p_model, win, price=-110, opp=-110, market="m", day=None, game=None, player=None):
++    return {"candidate_id": str(i), "season": 2025, "date": day or f"2026-0{1 + i % 6}-{1 + i % 27:02d}",
++            "game_id": game or str(i), "player_id": player, "market": market, "side": "over", "line": 1.5,
++            "price": price, "opp_price": opp, "p_model": p_model, "outcome": "win" if win else "loss",
++            "model_version": "v"}
++
++
++def test_calibrator_learns_informative_vs_useless_model():
++    rng = random.Random(3)
++    useful, useless = [], []
++    for i in range(4000):
++        truth = rng.uniform(0.3, 0.7)
++        win = rng.random() < truth
++        useful.append(_cand(i, truth, win))
++        useless.append(_cand(i, rng.uniform(0.3, 0.7), win))
++    a = Calibrator().fit(prepare(useful)).describe()
++    b = Calibrator().fit(prepare(useless)).describe()
++    assert a["b_model"] > 0.6 and abs(b["b_model"]) < 0.25
++
++
++def test_select_respects_limits_and_kelly_tiers():
++    day = "2026-01-05"
++    scored = []
++    for i in range(10):
++        c = _cand(i, 0.6, True, day=day, game="G1", player="P1" if i < 5 else None)
++        c.update(p=0.62, p_lo=0.60, ev=0.1, ev_lo=0.08 - i * 0.001, p_market=0.5, p_push=0.0, market=f"m{i}")
++        scored.append(c)
++    chosen = select(scored, 0.0)
++    assert len(chosen) <= 2  # two per game
++    assert sum(c.get("player_id") == "P1" for c in chosen) <= 1
++    stake, tier = kelly_tier({"price": -110, "p_lo": 0.59})
++    assert tier == "A++" and stake == 0.03
++    assert kelly_tier({"price": -110, "p_lo": 0.53})[1] == "pass"
++
++
++def test_tau_targets_count():
++    scored = []
++    for i in range(300):
++        c = _cand(i, 0.55, i % 2 == 0, day=f"2026-01-{1 + i % 28:02d}", game=str(i))
++        c.update(p=0.56, p_lo=0.54, ev=0.05, ev_lo=0.001 * i, p_market=0.5, p_push=0.0)
++        scored.append(c)
++    tau = tau_for_target(scored, 100)
++    assert len(select(scored, tau)) <= 100
++
++
++def test_rank_and_stake_end_to_end_split_date():
++    rng = random.Random(5)
++    cands = []
++    for i in range(6000):
++        day = f"2026-{1 + (i // 1000):02d}-{1 + (i % 28):02d}"
++        truth = rng.uniform(0.35, 0.65)
++        win = rng.random() < truth
++        for side, p, w in (("over", truth, win), ("under", 1 - truth, not win)):
++            c = _cand(i, min(max(p + rng.gauss(0, 0.03), 0.01), 0.99), w, day=day, game=f"g{i}")
++            c.update(side=side, candidate_id=f"{i}{side}")
++            cands.append(c)
++    report = rank_run(cands, split_date="2026-04-01", targets=(50, 100), mc_paths=200)
++    assert set(report["sweep"]) == {"50", "100"}
++    assert report["reliability_test"]["m"]["n"] > 0
++
++
++def test_planted_back_to_back_inefficiency_is_found_out_of_sample():
++    games, stats, odds, _ = synth_league(1, b2b_penalty=8.0)
++    rows, _ = build_rows(games, stats, odds)
++    cands, _ = run_games(rows)
++    scored, _ = walk_forward_score([c for c in cands if c["model_version"] == "residual_v2"])
++    res = simulate(select(scored, 0.0), "flat")
++    assert res["bets"] >= 100 and res["roi_on_turnover_pct"] > 5
++
++
++def test_prop_candidate_export_is_out_of_sample_and_two_sided():
++    from tests.test_pricing_and_v2 import synthetic_season
++    from scripts.export_prop_candidates import export
++    feats, lines, games = synthetic_season(4, priced=True)
++    cands, coverage = export([{"season": 2025, "features": feats, "lines": lines, "games": games}])
++    assert cands and all(c["market"] == "prop_threes" for c in cands)
++    first_month = min(c["date"][:7] for c in cands)
++    assert first_month > min(f["game_date"][:7] for f in feats)  # burn-in month never scored in-sample
++    by_bet = {}
++    for c in cands:
++        by_bet.setdefault(c["candidate_id"].rsplit(":", 1)[0], []).append(c)
++    assert all(len(v) == 2 for v in by_bet.values())
++    for v in by_bet.values():
++        assert sum(x["outcome"] == "win" for x in v) <= 1
++    scored, _ = walk_forward_score(cands)
++    res = simulate(select(scored, 0.0), "flat")
++    assert res["bets"] == 0 or res["roi_on_turnover_pct"] < 10  # fairly priced synthetic market
+diff --git a/v13/ranking.py b/v13/ranking.py
+new file mode 100644
+index 0000000..20474ec
+--- /dev/null
++++ b/v13/ranking.py
+@@ -0,0 +1,294 @@
++"""Universal cross-market ranking: every wager scored on one scale.
++
++Why this works across markets: a 1.5-assist edge and a 4-point spread edge are not
++comparable, but "probability of winning at this price, versus what the price
++requires" is. Each market's raw model probability is recalibrated AND blended with
++the de-vigged market probability by a logistic fit on strictly earlier data:
++
++    logit(p) = c + a * logit(p_market) + b * logit(p_model)
++
++If a market's model adds nothing, b -> 0, p -> p_market, expected value -> minus
++the vig, and that market simply stops producing selections. No quotas needed.
++
++Ranking key = EV at a conservative probability p_lo (one-sided 90% bound from the
++fit's parameter uncertainty), so thin or unstable markets are penalised.
++
++Candidate schema (one JSON object per side per line; both sides should be present):
++  candidate_id, season, date (YYYY-MM-DD), game_id, player_id (or null), market,
++  side, line, price (American, this side), opp_price (other side, or null),
++  p_model (model P(win | no push)), p_push (optional, default 0),
++  outcome ("win"/"loss"/"push"; used only for fitting on PAST rows and for grading)
++"""
++import math
++from collections import Counter, defaultdict
++
++import numpy as np
++
++from v13.pricing import implied_probability, no_vig_pair, profit_per_unit, wilson
++
++EPS = 1e-4
++
++
++def logit(p):
++    p = min(max(p, EPS), 1 - EPS)
++    return math.log(p / (1 - p))
++
++
++def sigmoid(z):
++    return 1 / (1 + math.exp(-z))
++
++
++def market_probability(c):
++    if c.get("opp_price") is None or c.get("price") is None:
++        return None
++    return no_vig_pair(c["price"], c["opp_price"])[0]
++
++
++def _features(c, use_market):
++    x = [1.0, logit(c["p_model"])]
++    if use_market:
++        x.append(logit(c["p_market"]))
++    return x
++
++
++class Calibrator:
++    """Weighted logistic regression (Newton) with a small ridge; keeps the covariance."""
++
++    def __init__(self, ridge=1.0, min_rows=200):
++        self.ridge, self.min_rows = ridge, min_rows
++        self.ok = False
++
++    def fit(self, rows):
++        rows = [r for r in rows if r["outcome"] in ("win", "loss")]
++        self.use_market = bool(rows) and all(r.get("p_market") is not None for r in rows)
++        if len(rows) < self.min_rows:
++            return self
++        X = np.array([_features(r, self.use_market) for r in rows])
++        y = np.array([1.0 if r["outcome"] == "win" else 0.0 for r in rows])
++        # Both sides of a line are usually present and perfectly anti-correlated: weight 0.5 each.
++        w = np.full(len(rows), 0.5)
++        beta = np.zeros(X.shape[1])
++        if self.use_market:
++            beta[2] = 1.0  # start at "trust the market"
++        pen = np.eye(X.shape[1]) * self.ridge
++        pen[0, 0] = 0
++        for _ in range(50):
++            p = 1 / (1 + np.exp(-(X @ beta)))
++            g = X.T @ (w * (y - p)) - pen @ beta
++            H = X.T @ (X * (w * p * (1 - p))[:, None]) + pen
++            step = np.linalg.solve(H, g)
++            beta += step
++            if np.max(np.abs(step)) < 1e-8:
++                break
++        self.beta, self.cov, self.n, self.ok = beta, np.linalg.inv(H), len(rows), True
++        return self
++
++    def predict(self, c, z=1.2816):
++        """(p, p_lo). z=1.2816 -> one-sided 90% lower bound."""
++        if not self.ok:
++            return None, None
++        x = np.array(_features(c, self.use_market))
++        eta = float(x @ self.beta)
++        se = float(math.sqrt(max(x @ self.cov @ x, 0.0)))
++        return sigmoid(eta), sigmoid(eta - z * se)
++
++    def describe(self):
++        if not self.ok:
++            return {"status": "insufficient rows"}
++        names = ["intercept", "b_model"] + (["a_market"] if self.use_market else [])
++        se = np.sqrt(np.diag(self.cov))
++        return {"n": self.n, **{k: round(float(v), 4) for k, v in zip(names, self.beta)},
++                **{f"se_{k}": round(float(s), 4) for k, s in zip(names, se)}}
++
++
++def prepare(candidates):
++    out = []
++    for c in candidates:
++        c = dict(c)
++        c["p_market"] = market_probability(c)
++        c.setdefault("p_push", 0.0)
++        out.append(c)
++    return sorted(out, key=lambda c: (c["date"], str(c["game_id"]), c["market"], str(c.get("player_id")), c["side"]))
++
++
++def walk_forward_score(candidates, refit="month", **cal_kwargs):
++    """Score every candidate with calibrators fitted only on candidates dated before its period."""
++    cands = prepare(candidates)
++    period = (lambda d: d[:7]) if refit == "month" else (lambda d: d)
++    periods = sorted({period(c["date"]) for c in cands})
++    scored, fits = [], {}
++    for per in periods:
++        start = min(c["date"] for c in cands if period(c["date"]) == per)
++        past = [c for c in cands if c["date"] < start]
++        bymarket = defaultdict(list)
++        for c in past:
++            bymarket[(c["market"], c.get("model_version"))].append(c)
++        cals = {m: Calibrator(**cal_kwargs).fit(rows) for m, rows in bymarket.items()}
++        fits[per] = {f"{m}|{v}": cal.describe() for (m, v), cal in cals.items()}
++        for c in cands:
++            if period(c["date"]) != per:
++                continue
++            cal = cals.get((c["market"], c.get("model_version")))
++            p, p_lo = cal.predict(c) if cal else (None, None)
++            if p is None:
++                continue
++            b = profit_per_unit(c["price"])
++            no_push = 1 - c["p_push"]
++            scored.append({**c, "p": p, "p_lo": p_lo,
++                           "ev": no_push * (p * b - (1 - p)),
++                           "ev_lo": no_push * (p_lo * b - (1 - p_lo))})
++    return scored, fits
++
++
++def kelly_tier(c, divisor=4.0):
++    """Stake fraction from quarter-Kelly on the conservative probability, bucketed to 0/1/2/3%."""
++    b = profit_per_unit(c["price"])
++    f = (c["p_lo"] * b - (1 - c["p_lo"])) / b
++    q = f / divisor
++    if q >= 0.025: return 0.03, "A++"
++    if q >= 0.015: return 0.02, "A+"
++    if q >= 0.0075: return 0.01, "A"
++    return 0.0, "pass"
++
++
++def select(scored, tau, per_game=2, per_player_game=1, daily_exposure=0.06, unit=0.01):
++    """Greedy by ev_lo within each day, subject to correlation and exposure limits."""
++    chosen = []
++    byday = defaultdict(list)
++    for c in scored:
++        byday[c["date"]].append(c)
++    for day in sorted(byday):
++        games, player_games, game_markets = Counter(), Counter(), set()
++        exposure = 0.0
++        for c in sorted(byday[day], key=lambda c: -c["ev_lo"]):
++            if c["ev_lo"] < tau:
++                break
++            stake, tier = kelly_tier(c)
++            stake = max(stake, unit)
++            gm = (str(c["game_id"]), c["market"], str(c.get("player_id")))
++            if gm in game_markets or games[str(c["game_id"])] >= per_game:
++                continue
++            if c.get("player_id") is not None and player_games[(str(c["game_id"]), str(c["player_id"]))] >= per_player_game:
++                continue
++            if exposure + stake > daily_exposure + 1e-9:
++                continue
++            games[str(c["game_id"])] += 1
++            if c.get("player_id") is not None:
++                player_games[(str(c["game_id"]), str(c["player_id"]))] += 1
++            game_markets.add(gm)
++            exposure += stake
++            chosen.append({**c, "tier": tier, "tier_stake": stake})
++    return chosen
++
++
++def simulate(bets, staking="flat", bankroll=10000.0, unit=0.01):
++    """Day-start staking. staking='flat' (1%) or 'tiered' (tier_stake)."""
++    led, peak, streak, worst_streak = [], bankroll, 0, 0
++    byday = defaultdict(list)
++    for b in bets:
++        byday[b["date"]].append(b)
++    for day in sorted(byday):
++        start = bankroll
++        for b in byday[day]:
++            frac = unit if staking == "flat" else b["tier_stake"]
++            stake = round(start * frac, 2)
++            o = b["outcome"]
++            pnl = round(stake * (profit_per_unit(b["price"]) if o == "win" else -1 if o == "loss" else 0), 2)
++            bankroll = round(bankroll + pnl, 2)
++            peak = max(peak, bankroll)
++            streak = streak + 1 if o == "loss" else (0 if o == "win" else streak)
++            worst_streak = max(worst_streak, streak)
++            led.append({**b, "stake": stake, "pnl": pnl, "bankroll": bankroll,
++                        "drawdown_pct": round(100 * (peak - bankroll) / peak, 3)})
++    return summarize(led, worst_streak)
++
++
++def summarize(led, worst_streak=None):
++    c = Counter(x["outcome"] for x in led)
++    n = c["win"] + c["loss"]
++    staked = sum(x["stake"] for x in led)
++    tiers = {}
++    for t in ("A", "A+", "A++", "pass"):
++        sub = [x for x in led if x.get("tier") == t]
++        if sub:
++            cc = Counter(x["outcome"] for x in sub); nn = cc["win"] + cc["loss"]
++            st = sum(x["stake"] for x in sub)
++            tiers[t] = {"bets": len(sub), "hit_rate": round(cc["win"] / nn, 4) if nn else None,
++                        "hit_95ci": wilson(cc["win"], nn),
++                        "mean_breakeven": round(sum(implied_probability(x["price"]) for x in sub) / len(sub), 4),
++                        "roi_pct": round(100 * sum(x["pnl"] for x in sub) / st, 2) if st else None}
++    markets = {}
++    for m in sorted({x["market"] for x in led}):
++        sub = [x for x in led if x["market"] == m]
++        cc = Counter(x["outcome"] for x in sub); st = sum(x["stake"] for x in sub)
++        markets[m] = {"bets": len(sub), "wins": cc["win"], "losses": cc["loss"],
++                      "roi_pct": round(100 * sum(x["pnl"] for x in sub) / st, 2) if st else None}
++    return {"bets": len(led), "wins": c["win"], "losses": c["loss"], "pushes": c["push"],
++            "hit_rate": round(c["win"] / n, 4) if n else None, "hit_95ci": wilson(c["win"], n),
++            "roi_on_turnover_pct": round(100 * sum(x["pnl"] for x in led) / staked, 2) if staked else None,
++            "ending_bankroll": led[-1]["bankroll"] if led else 10000.0,
++            "max_drawdown_pct": max((x["drawdown_pct"] for x in led), default=0.0),
++            "longest_losing_streak": worst_streak, "by_tier": tiers, "by_market": markets, "ledger": led}
++
++
++def tau_for_target(scored, target, lo=-0.05, hi=0.30, iters=40, **kw):
++    """Smallest EV_lo cutoff whose selection count on `scored` does not exceed target."""
++    if len(select(scored, lo, **kw)) <= target:
++        return lo
++    for _ in range(iters):
++        mid = (lo + hi) / 2
++        if len(select(scored, mid, **kw)) > target:
++            lo = mid
++        else:
++            hi = mid
++    return hi
++
++
++def monte_carlo(ledger, staking="flat", paths=10000, seed=7, unit=0.01, bankroll=10000.0):
++    """Bootstrap whole betting days from a holdout ledger; returns ending-bankroll distribution."""
++    rng = np.random.default_rng(seed)
++    byday = defaultdict(list)
++    for b in ledger:
++        byday[b["date"]].append(b)
++    days = list(byday.values())
++    if not days:
++        return None
++    ends, dds = [], []
++    for _ in range(paths):
++        bank, peak, mdd = bankroll, bankroll, 0.0
++        for i in rng.integers(0, len(days), len(days)):
++            start = bank
++            for b in days[i]:
++                frac = unit if staking == "flat" else b["tier_stake"]
++                o = b["outcome"]
++                bank += start * frac * (profit_per_unit(b["price"]) if o == "win" else -1 if o == "loss" else 0)
++            peak = max(peak, bank); mdd = max(mdd, (peak - bank) / peak)
++        ends.append(bank); dds.append(mdd)
++    ends, dds = np.array(ends), np.array(dds)
++    return {"paths": paths, "p5": round(float(np.percentile(ends, 5))), "p50": round(float(np.median(ends))),
++            "p95": round(float(np.percentile(ends, 95))), "prob_ge_15000": round(float((ends >= 15000).mean()), 4),
++            "prob_below_start": round(float((ends < bankroll).mean()), 4),
++            "median_max_drawdown_pct": round(100 * float(np.median(dds)), 2),
++            "p95_max_drawdown_pct": round(100 * float(np.percentile(dds, 95)), 2)}
++
++
++def reliability(scored, bins=10):
++    """Calibration table plus Brier/log loss of blended p vs de-vigged market, decided rows only."""
++    rows = [c for c in scored if c["outcome"] in ("win", "loss")]
++    if not rows:
++        return None
++    table = defaultdict(list)
++    for c in rows:
++        table[min(bins - 1, int(c["p"] * bins))].append(c)
++    out = {"bins": [{"bin": k, "n": len(v), "mean_p": round(sum(c["p"] for c in v) / len(v), 4),
++                     "hit_rate": round(sum(c["outcome"] == "win" for c in v) / len(v), 4)} for k, v in sorted(table.items())]}
++    y = [1.0 if c["outcome"] == "win" else 0.0 for c in rows]
++    def ll(ps): return -sum(yy * math.log(max(p, EPS)) + (1 - yy) * math.log(max(1 - p, EPS)) for yy, p in zip(y, ps)) / len(y)
++    out["n"] = len(rows)
++    out["brier_model"] = round(sum((c["p"] - yy) ** 2 for c, yy in zip(rows, y)) / len(y), 5)
++    out["logloss_model"] = round(ll([c["p"] for c in rows]), 5)
++    mk = [c for c in rows if c.get("p_market") is not None]
++    if len(mk) == len(rows):
++        out["brier_market"] = round(sum((c["p_market"] - yy) ** 2 for c, yy in zip(rows, y)) / len(y), 5)
++        out["logloss_market"] = round(ll([c["p_market"] for c in rows]), 5)
++    return out
+diff --git a/v13/schedule_travel.py b/v13/schedule_travel.py
+new file mode 100644
+index 0000000..ca168fb
+--- /dev/null
++++ b/v13/schedule_travel.py
+@@ -0,0 +1,70 @@
++"""Point-in-time rest, schedule-density and travel features for both teams.
++
++Venue is assumed to be the home team's arena (neutral-site games such as
++international series are rare and are not handled). Coordinates are arena
++approximations; timezone offsets ignore daylight saving (only differences matter).
++"""
++import math
++from datetime import date
++
++# abbreviation: (lat, lon, utc_offset_standard, altitude_m)
++ARENAS = {
++    "ATL": (33.757, -84.396, -5, 320), "BOS": (42.366, -71.062, -5, 5), "BKN": (40.683, -73.975, -5, 10),
++    "CHA": (35.225, -80.839, -5, 230), "CHI": (41.881, -87.674, -6, 180), "CLE": (41.497, -81.688, -5, 200),
++    "DAL": (32.790, -96.810, -6, 130), "DEN": (39.749, -105.008, -7, 1609), "DET": (42.341, -83.055, -5, 190),
++    "GSW": (37.768, -122.388, -8, 5), "HOU": (29.751, -95.362, -6, 15), "IND": (39.764, -86.155, -5, 220),
++    "LAC": (33.945, -118.341, -8, 30), "LAL": (34.043, -118.267, -8, 80), "MEM": (35.138, -90.051, -6, 80),
++    "MIA": (25.781, -80.188, -5, 2), "MIL": (43.045, -87.917, -6, 180), "MIN": (44.979, -93.276, -6, 260),
++    "NOP": (29.949, -90.082, -6, 2), "NYK": (40.751, -73.993, -5, 10), "OKC": (35.463, -97.515, -6, 365),
++    "ORL": (28.539, -81.384, -5, 30), "PHI": (39.901, -75.172, -5, 10), "PHX": (33.446, -112.071, -7, 330),
++    "POR": (45.532, -122.667, -8, 15), "SAC": (38.580, -121.500, -8, 8), "SAS": (29.427, -98.437, -6, 200),
++    "TOR": (43.643, -79.379, -5, 80), "UTA": (40.768, -111.901, -7, 1288), "WAS": (38.898, -77.021, -5, 10),
++}
++HIGH_ALTITUDE_M = 1000
++
++
++def _km(a, b):
++    lat1, lon1, lat2, lon2 = map(math.radians, (a[0], a[1], b[0], b[1]))
++    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
++    return 6371 * 2 * math.asin(math.sqrt(h))
++
++
++def _abbr(team):
++    return team.get("abbreviation") if isinstance(team, dict) else None
++
++
++def _id(team):
++    return str(team.get("id")) if isinstance(team, dict) else str(team)
++
++
++def schedule_travel_features(games):
++    """game_id -> features. Uses only the schedule (dates/venues), never results."""
++    last = {}       # team -> (date, venue_abbr)
++    history = {}    # team -> list of dates
++    out = {}
++    for g in sorted(games, key=lambda x: (str(x.get("date", "")), str(x.get("id", "")))):
++        day = date.fromisoformat(str(g["date"])[:10])
++        venue = _abbr(g.get("home_team"))
++        feats = {}
++        for side, team in (("home", g.get("home_team")), ("away", g.get("visitor_team"))):
++            tid = _id(team)
++            prev = last.get(tid)
++            rest = (day - prev[0]).days - 1 if prev else None
++            feats[f"{side}_rest_days"] = rest
++            feats[f"{side}_b2b"] = int(rest == 0) if rest is not None else 0
++            feats[f"{side}_games_last_4d"] = sum(0 < (day - d).days <= 3 for d in history.get(tid, []))
++            km = tz = None
++            if prev and venue in ARENAS and prev[1] in ARENAS:
++                km = _km(ARENAS[prev[1]], ARENAS[venue])
++                tz = ARENAS[venue][2] - ARENAS[prev[1]][2]
++            feats[f"{side}_travel_km"] = km
++            feats[f"{side}_tz_shift"] = tz
++        feats["away_at_altitude"] = int(venue in ARENAS and ARENAS[venue][3] >= HIGH_ALTITUDE_M)
++        r_h, r_a = feats["home_rest_days"], feats["away_rest_days"]
++        feats["rest_diff"] = (min(r_h, 3) - min(r_a, 3)) if r_h is not None and r_a is not None else 0
++        out[str(g["id"])] = feats
++        for team in (g.get("home_team"), g.get("visitor_team")):
++            tid = _id(team)
++            last[tid] = (day, venue)
++            history.setdefault(tid, []).append(day)
++    return out
+diff --git a/v13/team_ratings.py b/v13/team_ratings.py
+new file mode 100644
+index 0000000..cbe4ef4
+--- /dev/null
++++ b/v13/team_ratings.py
+@@ -0,0 +1,183 @@
++"""Point-in-time team possessions, Four Factors and opponent-adjusted ratings.
++
++Inputs are BALLDONTLIE objects already filtered to played regular-season rows
++(see scripts/regular_season_filter.py):
++  games: {id, date, datetime, home_team{id}, visitor_team{id}, home_team_score, visitor_team_score, status}
++  stats: {min, fgm, fga, fg3m, fg3a, ftm, fta, oreb, dreb, turnover, pts, team{id}, game{id}}
++
++Every projection for a game on date D is fitted ONLY on games dated before D.
++"""
++import math
++from collections import defaultdict
++from datetime import date
++
++import numpy as np
++
++BOX_FIELDS = ("pts", "fgm", "fga", "fg3m", "fg3a", "ftm", "fta", "oreb", "dreb", "turnover")
++
++
++def _tid(x):
++    return x.get("id") if isinstance(x, dict) else x
++
++
++def team_boxes(stats):
++    """(game_id, team_id) -> summed box score."""
++    out = defaultdict(lambda: {k: 0.0 for k in BOX_FIELDS})
++    for r in stats:
++        gid = (r.get("game") or {}).get("id")
++        tid = _tid(r.get("team"))
++        if gid is None or tid is None:
++            continue
++        box = out[(str(gid), str(tid))]
++        for k in BOX_FIELDS:
++            box[k] += float(r.get(k) or 0)
++    return dict(out)
++
++
++def possessions(box):
++    """Standard estimate: FGA - OREB + TOV + 0.44*FTA."""
++    return box["fga"] - box["oreb"] + box["turnover"] + 0.44 * box["fta"]
++
++
++def four_factors(own, opp):
++    poss = possessions(own)
++    return {
++        "efg": (own["fgm"] + 0.5 * own["fg3m"]) / own["fga"] if own["fga"] else None,
++        "tov_rate": own["turnover"] / poss if poss else None,
++        "orb_rate": own["oreb"] / (own["oreb"] + opp["dreb"]) if (own["oreb"] + opp["dreb"]) else None,
++        "ft_rate": own["ftm"] / own["fga"] if own["fga"] else None,
++        "three_rate": own["fg3a"] / own["fga"] if own["fga"] else None,
++    }
++
++
++def game_records(games, stats):
++    """One record per finished game with both teams' box scores and possessions."""
++    boxes = team_boxes(stats)
++    recs = []
++    for g in games:
++        if g.get("status") != "Final":
++            continue
++        gid, h, a = str(g["id"]), str(_tid(g.get("home_team"))), str(_tid(g.get("visitor_team")))
++        hb, ab = boxes.get((gid, h)), boxes.get((gid, a))
++        if not hb or not ab or not hb["fga"] or not ab["fga"]:
++            continue
++        poss = 0.5 * (possessions(hb) + possessions(ab))
++        if poss <= 0:
++            continue
++        recs.append({"game_id": gid, "date": str(g["date"])[:10], "season": g.get("season"),
++                     "home": h, "away": a, "poss": poss,
++                     "home_pts": float(g["home_team_score"]), "away_pts": float(g["visitor_team_score"]),
++                     "home_ff": four_factors(hb, ab), "away_ff": four_factors(ab, hb)})
++    return sorted(recs, key=lambda r: (r["date"], r["game_id"]))
++
++
++class RatingModel:
++    """Weighted ridge fit of offence, defence and pace with exponential time decay.
++
++    points_per_100(team T vs opp O at home h) = mu + home*h + off[T] - def[O]
++    possessions(T vs O) = pace_mu + pace[T] + pace[O]
++    """
++
++    def __init__(self, half_life_days=45.0, ridge=8.0, prior_season_weight=0.5):
++        self.half_life = half_life_days
++        self.ridge = ridge
++        self.prior_weight = prior_season_weight
++
++    def fit(self, records, as_of, current_season=None):
++        teams = sorted({r["home"] for r in records} | {r["away"] for r in records})
++        idx = {t: i for i, t in enumerate(teams)}
++        n = len(teams)
++        if n < 2 or not records:
++            self.ok = False
++            return self
++        as_of_d = date.fromisoformat(as_of)
++        rows_e, y_e, w_e, rows_p, y_p, w_p = [], [], [], [], [], []
++        for r in records:
++            age = (as_of_d - date.fromisoformat(r["date"])).days
++            w = 0.5 ** (age / self.half_life)
++            if current_season is not None and r.get("season") is not None and r["season"] != current_season:
++                w *= self.prior_weight
++            for team, opp, pts, home in ((r["home"], r["away"], r["home_pts"], 1), (r["away"], r["home"], r["away_pts"], 0)):
++                x = np.zeros(2 + 2 * n)
++                x[0] = 1; x[1] = home; x[2 + idx[team]] = 1; x[2 + n + idx[opp]] = -1
++                rows_e.append(x); y_e.append(100 * pts / r["poss"]); w_e.append(w)
++            xp = np.zeros(1 + n); xp[0] = 1; xp[1 + idx[r["home"]]] = 1; xp[1 + idx[r["away"]]] = 1
++            rows_p.append(xp); y_p.append(r["poss"]); w_p.append(w)
++        self.beta_e = self._solve(np.array(rows_e), np.array(y_e), np.array(w_e), unpenalised=2)
++        self.beta_p = self._solve(np.array(rows_p), np.array(y_p), np.array(w_p), unpenalised=1)
++        resid = np.array(y_e) - np.array(rows_e) @ self.beta_e
++        self.eff_sd = float(np.sqrt(np.average(resid ** 2, weights=w_e)))
++        self.idx, self.n, self.ok = idx, n, True
++        return self
++
++    def _solve(self, X, y, w, unpenalised):
++        W = w[:, None]
++        penalty = np.eye(X.shape[1]) * self.ridge
++        penalty[:unpenalised, :unpenalised] = 0
++        return np.linalg.solve(X.T @ (W * X) + penalty, X.T @ (w * y))
++
++    def rating(self, team):
++        i = self.idx.get(team)
++        if i is None:
++            return 0.0, 0.0, 0.0
++        return float(self.beta_e[2 + i]), float(self.beta_e[2 + self.n + i]), float(self.beta_p[1 + i])
++
++    def project(self, home, away):
++        if not getattr(self, "ok", False):
++            return None
++        ho, hd, hp = self.rating(home)
++        ao, ad, ap = self.rating(away)
++        mu, hca = self.beta_e[0], self.beta_e[1]
++        poss = self.beta_p[0] + hp + ap
++        home_ppp = mu + hca + ho - ad
++        away_ppp = mu + ao - hd
++        return {"poss": float(poss), "home_pts": float(poss * home_ppp / 100), "away_pts": float(poss * away_ppp / 100),
++                "home_court_per100": float(hca), "home_net": ho + hd, "away_net": ao + ad}
++
++
++def rolling_four_factors(records, team, before, window=15):
++    """Mean of a team's own and allowed Four Factors over its last `window` games before `before`."""
++    own, allowed = defaultdict(list), defaultdict(list)
++    games = [r for r in records if r["date"] < before and team in (r["home"], r["away"])][-window:]
++    for r in games:
++        mine, theirs = (r["home_ff"], r["away_ff"]) if r["home"] == team else (r["away_ff"], r["home_ff"])
++        for k, v in mine.items():
++            if v is not None: own[k].append(v)
++        for k, v in theirs.items():
++            if v is not None: allowed[k].append(v)
++    out = {f"ff_{k}": sum(v) / len(v) for k, v in own.items() if v}
++    out.update({f"ff_allowed_{k}": sum(v) / len(v) for k, v in allowed.items() if v})
++    return out
++
++
++def pregame_projections(games, stats, refit_every_days=1, **model_kwargs):
++    """Projection per game using only games on strictly earlier dates. Multi-season input allowed."""
++    recs = game_records(games, stats)
++    by_date = defaultdict(list)
++    for g in games:
++        by_date[str(g["date"])[:10]].append(g)
++    out, model, last_fit = [], None, None
++    for day in sorted(by_date):
++        prior = [r for r in recs if r["date"] < day]
++        if len(prior) < 60:
++            continue
++        season = next((g.get("season") for g in by_date[day] if g.get("season") is not None), None)
++        if model is None or last_fit is None or (date.fromisoformat(day) - date.fromisoformat(last_fit)).days >= refit_every_days:
++            model = RatingModel(**model_kwargs).fit(prior, day, season); last_fit = day
++        for g in by_date[day]:
++            h, a = str(_tid(g.get("home_team"))), str(_tid(g.get("visitor_team")))
++            p = model.project(h, a)
++            if p is None:
++                continue
++            row = {"game_id": str(g["id"]), "date": day, "season": season, "home": h, "away": a,
++                   "proj_poss": p["poss"], "proj_home_pts": p["home_pts"], "proj_away_pts": p["away_pts"],
++                   "proj_margin": p["home_pts"] - p["away_pts"], "proj_total": p["home_pts"] + p["away_pts"],
++                   "home_court_per100": p["home_court_per100"]}
++            for side, team in (("home", h), ("away", a)):
++                for k, v in rolling_four_factors(prior, team, day).items():
++                    row[f"{side}_{k}"] = v
++            if g.get("status") == "Final" and g.get("home_team_score") is not None:
++                row["actual_margin"] = float(g["home_team_score"]) - float(g["visitor_team_score"])
++                row["actual_total"] = float(g["home_team_score"]) + float(g["visitor_team_score"])
++            out.append(row)
++    return out
+-- 
+2.43.0
+
+
+From 78a593c760daa2697acaa59cd8b2f5b2c3ab04c6 Mon Sep 17 00:00:00 2001
+From: Claude audit <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 15:43:38 -0500
+Subject: [PATCH 3/4] Round 4: pooled vs per-market calibration, staking
+ variants, edge-shrink sensitivity, feasibility calculator, live odds logger,
+ cross-market consistency challenger
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ scripts/bankroll_feasibility.py     |  84 ++++++++++++++++
+ scripts/cross_market_consistency.py | 143 ++++++++++++++++++++++++++++
+ scripts/log_live_odds.py            |  88 +++++++++++++++++
+ scripts/rank_and_stake.py           |  28 +++---
+ tests/test_ranking_and_game_v2.py   |  30 ++++++
+ tests/test_round4.py                |  74 ++++++++++++++
+ v13/ranking.py                      |  72 ++++++++++++--
+ 7 files changed, 499 insertions(+), 20 deletions(-)
+ create mode 100644 scripts/bankroll_feasibility.py
+ create mode 100644 scripts/cross_market_consistency.py
+ create mode 100644 scripts/log_live_odds.py
+ create mode 100644 tests/test_round4.py
+
+diff --git a/scripts/bankroll_feasibility.py b/scripts/bankroll_feasibility.py
+new file mode 100644
+index 0000000..705ea66
+--- /dev/null
++++ b/scripts/bankroll_feasibility.py
+@@ -0,0 +1,84 @@
++"""How much forecasting edge does $10k -> $15k actually require?
++
++For a bet count N, a price profile and a staking plan, find the excess win probability over
++the de-vigged fair probability (in percentage points) at which the median season ends at
++$15,000, and report outcome distributions across a grid of edges. Pure simulation: it uses
++no historical results, so it can be run before any model exists.
++
++python -m scripts.bankroll_feasibility --out research_results/feasibility.json
++"""
++import argparse, json
++
++import numpy as np
++
++from v13.pricing import implied_probability, profit_per_unit
++
++PROFILES = {
++    "minus110_both_sides": [(-110, -110)],
++    "favourite_unders_-178": [(-178, 140)],
++    "plus_money_+130": [(130, -160)],
++    "mixed_props": [(-110, -110), (-130, 105), (-150, 120), (-178, 140), (115, -140)],
++}
++PLANS = {"flat_1pct": [(0.01, 1.0)], "flat_2pct": [(0.02, 1.0)],
++         "tiers_1_2_3_mix_60_30_10": [(0.01, 0.6), (0.02, 0.3), (0.03, 0.1)],
++         "tiers_capped_2pct": [(0.01, 0.6), (0.02, 0.4)]}
++
++
++def fair_prob(price, opp):
++    a, b = implied_probability(price), implied_probability(opp)
++    return a / (a + b)
++
++
++def simulate(n, profile, plan, edge, paths=20000, seed=3, per_day=3):
++    rng = np.random.default_rng(seed)
++    idx = rng.integers(0, len(profile), (paths, n))
++    fair = np.array([fair_prob(p, o) for p, o in profile])[idx]
++    payout = np.array([profit_per_unit(p) for p, _ in profile])[idx]
++    win = rng.random((paths, n)) < np.clip(fair + edge, 0, 1)
++    fr, wts = zip(*plan)
++    stake = rng.choice(fr, size=(paths, n), p=np.array(wts) / sum(wts))
++    ret = np.where(win, payout, -1.0) * stake
++    bank = np.full(paths, 10000.0); peak = bank.copy(); mdd = np.zeros(paths)
++    for start in range(0, n, per_day):  # bets in groups of `per_day` share a bankroll snapshot
++        snap = bank.copy()
++        bank = bank + snap * ret[:, start:start + per_day].sum(axis=1)
++        peak = np.maximum(peak, bank); mdd = np.maximum(mdd, (peak - bank) / peak)
++    roi = float((ret.sum(axis=1) / stake.sum(axis=1)).mean())
++    return {"edge_pts": round(100 * edge, 2), "mean_roi_pct": round(100 * roi, 2),
++            "median_end": round(float(np.median(bank))), "prob_ge_15000": round(float((bank >= 15000).mean()), 3),
++            "prob_below_10000": round(float((bank < 10000).mean()), 3),
++            "median_max_dd_pct": round(100 * float(np.median(mdd)), 1),
++            "p95_max_dd_pct": round(100 * float(np.percentile(mdd, 95)), 1)}
++
++
++def required_edge(n, profile, plan, target_prob=0.5, paths=8000):
++    lo, hi = 0.0, 0.25
++    for _ in range(12):
++        mid = (lo + hi) / 2
++        if simulate(n, profile, plan, mid, paths)["prob_ge_15000"] >= target_prob:
++            hi = mid
++        else:
++            lo = mid
++    return round(100 * hi, 2)
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--out", required=True)
++    p.add_argument("--counts", default="100,150,200,250,300")
++    a = p.parse_args()
++    counts = [int(x) for x in a.counts.split(",")]
++    report = {"note": "edge = win probability above the de-vigged fair probability; 3 bets share each bankroll snapshot",
++              "required_edge_for_median_15k": {}, "grid_200_bets": {}}
++    for prof_name, prof in PROFILES.items():
++        for plan_name, plan in PLANS.items():
++            key = f"{prof_name}|{plan_name}"
++            report["required_edge_for_median_15k"][key] = {str(n): required_edge(n, prof, plan) for n in counts}
++            report["grid_200_bets"][key] = [simulate(200, prof, plan, e) for e in (0.0, 0.02, 0.03, 0.05, 0.08)]
++    out = __import__("pathlib").Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
++    out.write_text(json.dumps(report, indent=2) + "\n")
++    print(json.dumps(report["required_edge_for_median_15k"], indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/cross_market_consistency.py b/scripts/cross_market_consistency.py
+new file mode 100644
+index 0000000..7aa4c84
+--- /dev/null
++++ b/scripts/cross_market_consistency.py
+@@ -0,0 +1,143 @@
++"""Challenger experiment: are game lines and player-points prop lines mutually consistent?
++
++Books set the spread/total and hundreds of player props partly separately. A team's
++implied points (from spread + total) should match what its players' points props add up
++to. Where they disagree, one of the two is stale. This asks, strictly out of sample,
++which side the result follows, and whether a frozen rule built on the gap wins at actual prices.
++
++Gap (per team-game) = implied team total - (a + b*sum_of_points_lines + c*players_with_lines),
++with a,b,c fitted only on earlier months. Rule (pre-registered): when gap >= +G, bet the OVER
++on that team's points props; when gap <= -G, the UNDER. G = 1 SD of training-month gaps.
++
++python -m scripts.cross_market_consistency --games games_2025.jsonl --game-odds opening_2025.jsonl \
++  --props opening_props_2025.jsonl --stats player_stats_regular_2025.jsonl --out research_results/consistency_2025.json
++"""
++import argparse, json, math
++from collections import Counter, defaultdict
++from pathlib import Path
++
++import numpy as np
++
++from scripts.backtest_opening_spreads_totals import choose
++from scripts.backtest_prop_holdout import ALIASES, VENDORS
++from v13.pricing import pregame_status, profit_per_unit, prop_prices, tip_times, wilson
++
++
++def read(p):
++    return [json.loads(x) for x in Path(p).open() if x.strip()]
++
++
++def _tid(x):
++    return str(x.get("id")) if isinstance(x, dict) else str(x)
++
++
++def player_team_before(stats):
++    """(player_id, date) -> team from the player's most recent EARLIER game (pregame-knowable)."""
++    hist = defaultdict(list)
++    for r in stats:
++        pid = (r.get("player") or {}).get("id"); g = r.get("game") or {}
++        if pid is not None and g.get("date") and r.get("team"):
++            hist[str(pid)].append((str(g["date"])[:10], _tid(r["team"])))
++    for v in hist.values():
++        v.sort()
++    def lookup(pid, day):
++        prior = [t for d, t in hist.get(str(pid), []) if d < day]
++        return prior[-1] if prior else None
++    return lookup
++
++
++def points_lines(props, tips):
++    best = {}
++    for r in props:
++        if ALIASES.get(r.get("prop_type")) != "points" or (r.get("market") or {}).get("type") != "over_under":
++            continue
++        if pregame_status(r.get("opened_at"), tips.get(str(r.get("game_id")))) != "pregame":
++            continue
++        over, under = prop_prices(r)
++        if over is None or under is None:
++            continue
++        key = (str(r["game_id"]), str(r["player_id"]))
++        v = str(r.get("vendor") or "").lower()
++        rank = (VENDORS.index(v) if v in VENDORS else 99, str(r["opened_at"]))
++        if key not in best or rank < best[key][0]:
++            best[key] = (rank, {"line": float(r["line_value"]), "over": over, "under": under})
++    return {k: v[1] for k, v in best.items()}
++
++
++def build(games, game_odds, props, stats):
++    tips = tip_times(games)
++    lines = choose(game_odds, tips)
++    plines = points_lines(props, tips)
++    team_of = player_team_before(stats)
++    actual = {(str((r.get("game") or {}).get("id")), str((r.get("player") or {}).get("id"))): float(r.get("pts") or 0) for r in stats}
++    by_team = defaultdict(list)
++    gdate = {str(g["id"]): str(g["date"])[:10] for g in games}
++    for (gid, pid), pl in plines.items():
++        team = team_of(pid, gdate.get(gid, "0000"))
++        if team and (gid, pid) in actual:
++            by_team[(gid, team)].append({**pl, "player_id": pid, "actual": actual[(gid, pid)]})
++    rows = []
++    for g in games:
++        gid = str(g["id"]); o = lines.get(gid)
++        if not o or o.get("spread_home_value") is None or o.get("total_value") is None or g.get("home_team_score") is None:
++            continue
++        margin, total = -float(o["spread_home_value"]), float(o["total_value"])
++        for team, implied, pts in ((_tid(g["home_team"]), (total + margin) / 2, g["home_team_score"]),
++                                   (_tid(g["visitor_team"]), (total - margin) / 2, g["visitor_team_score"])):
++            players = by_team.get((gid, team), [])
++            if len(players) < 3:
++                continue
++            rows.append({"game_id": gid, "date": gdate[gid], "team": team, "implied": implied, "actual_team": float(pts),
++                         "sum_lines": sum(p["line"] for p in players), "n": len(players), "players": players})
++    return sorted(rows, key=lambda r: r["date"])
++
++
++def run(rows, min_train=200):
++    out_rows, bets = [], []
++    for month in sorted({r["date"][:7] for r in rows}):
++        train = [r for r in rows if r["date"][:7] < month]
++        test = [r for r in rows if r["date"][:7] == month]
++        if len(train) < min_train:
++            continue
++        X = np.array([[1, r["sum_lines"], r["n"]] for r in train]); y = np.array([r["implied"] for r in train])
++        beta = np.linalg.lstsq(X, y, rcond=None)[0]
++        G = float(np.std(y - X @ beta))
++        for r in test:
++            gap = r["implied"] - float(np.array([1, r["sum_lines"], r["n"]]) @ beta)
++            out_rows.append({**r, "gap": gap, "G": G})
++            if abs(gap) >= G:
++                side = "over" if gap > 0 else "under"
++                for p in r["players"]:
++                    d = p["actual"] - p["line"]
++                    o = "push" if abs(d) < 1e-9 else ("win" if (d > 0) == (side == "over") else "loss")
++                    bets.append({"date": r["date"], "side": side, "price": p[side], "outcome": o})
++    def corr(a, b):
++        return round(float(np.corrcoef(a, b)[0, 1]), 4) if len(a) > 2 else None
++    gaps = [r["gap"] for r in out_rows]
++    c = Counter(b["outcome"] for b in bets); n = c["win"] + c["loss"]
++    staked = sum(1 for b in bets if b["outcome"] != "push")
++    pnl = sum(profit_per_unit(b["price"]) if b["outcome"] == "win" else -1 for b in bets if b["outcome"] != "push")
++    return {"team_games_scored": len(out_rows),
++            "corr_gap_with_team_points_minus_implied": corr(gaps, [r["actual_team"] - r["implied"] for r in out_rows]),
++            "corr_gap_with_player_points_minus_lines": corr(gaps, [sum(p["actual"] for p in r["players"]) - r["sum_lines"] for r in out_rows]),
++            "reading_guide": "Positive corr with player points minus lines = prop lines were stale (team total right); "
++                             "positive corr with team points minus implied = the game line was stale.",
++            "rule_bets": len(bets), "rule_record": dict(c), "rule_hit_95ci": wilson(c["win"], n),
++            "rule_roi_flat_pct": round(100 * pnl / staked, 2) if staked else None,
++            "rule_by_side": {s: dict(Counter(b["outcome"] for b in bets if b["side"] == s)) for s in ("over", "under")},
++            "note": "Bets on one team-game are correlated; treat the CI as optimistic. Exploratory until replicated on a second season."}
++
++
++def main():
++    p = argparse.ArgumentParser()
++    for k in ("games", "game-odds", "props", "stats", "out"):
++        p.add_argument(f"--{k}", required=True)
++    a = p.parse_args()
++    rows = build(read(a.games), read(a.game_odds), read(a.props), read(a.stats))
++    result = run(rows)
++    Path(a.out).parent.mkdir(parents=True, exist_ok=True); Path(a.out).write_text(json.dumps(result, indent=2) + "\n")
++    print(json.dumps(result, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/log_live_odds.py b/scripts/log_live_odds.py
+new file mode 100644
+index 0000000..75c90b9
+--- /dev/null
++++ b/scripts/log_live_odds.py
+@@ -0,0 +1,88 @@
++"""Append-only snapshot logger for current NBA game odds and player props (closing lines / CLV).
++
++Each run fetches today's and tomorrow's games (America/Chicago), then every vendor's current
++game odds and player props, stamps each row with retrieved_at_utc, and writes one JSONL file
++per run. The workflow uploads that file to a weekly GitHub Release (under the 1,000-asset cap) so data is never lost to
++artifact retention. Never edits or deletes earlier snapshots.
++
++python -m scripts.log_live_odds --out-dir research_data/live_odds
++"""
++import argparse, json, os, time
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++from zoneinfo import ZoneInfo
++
++import requests
++
++BASE = "https://api.balldontlie.io"
++
++
++def get(session, path, params, key, tries=6):
++    for attempt in range(tries):
++        r = session.get(BASE + path, params=params, headers={"Authorization": key}, timeout=40)
++        if r.status_code in (429, 500, 502, 503, 504):
++            time.sleep(min(5 * (attempt + 1), 30)); continue
++        r.raise_for_status()
++        return r.json()
++    r.raise_for_status()
++
++
++def paged(session, path, params, key):
++    cursor, rows = None, []
++    while True:
++        q = list(params) + [("per_page", "100")] + ([("cursor", str(cursor))] if cursor is not None else [])
++        payload = get(session, path, q, key)
++        rows += payload.get("data", [])
++        cursor = (payload.get("meta") or {}).get("next_cursor")
++        if cursor is None:
++            return rows
++
++
++def snapshot(key, now=None):
++    now = now or datetime.now(timezone.utc)
++    local = now.astimezone(ZoneInfo("America/Chicago")).date()
++    dates = [local.isoformat(), (local + timedelta(days=1)).isoformat()]
++    s = requests.Session()
++    games = paged(s, "/v1/games", [("dates[]", d) for d in dates], key)
++    upcoming = [g for g in games if g.get("status_state", "scheduled") in ("scheduled", "delayed")
++                or str(g.get("status", "")).endswith("ET")]
++    stamp = now.isoformat()
++    rows = []
++    ids = [g["id"] for g in upcoming]
++    for i in range(0, len(ids), 10):
++        for r in paged(s, "/nba/v2/odds", [("game_ids[]", str(x)) for x in ids[i:i + 10]], key):
++            rows.append({"kind": "game_odds", "retrieved_at_utc": stamp, **r})
++    for gid in ids:
++        payload = get(s, "/nba/v2/odds/player_props", [("game_id", str(gid))], key)
++        for r in payload.get("data", []):
++            rows.append({"kind": "player_prop", "retrieved_at_utc": stamp, **r})
++        time.sleep(0.1)
++    tips = {str(g["id"]): g.get("datetime") for g in upcoming}
++    for r in rows:
++        r["tip_utc"] = tips.get(str(r.get("game_id")))
++    return rows, len(upcoming)
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--out-dir", default="research_data/live_odds")
++    a = p.parse_args()
++    key = os.environ.get("BALLDONTLIE_API_KEY")
++    if not key:
++        raise RuntimeError("BALLDONTLIE_API_KEY not set")
++    rows, n_games = snapshot(key)
++    now = datetime.now(timezone.utc)
++    out = Path(a.out_dir) / now.strftime("%Y-%m") / f"snapshot_{now.strftime('%Y%m%dT%H%M%SZ')}.jsonl"
++    out.parent.mkdir(parents=True, exist_ok=True)
++    out.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
++    print(json.dumps({"file": str(out), "upcoming_games": n_games, "rows": len(rows),
++                      "game_odds": sum(r["kind"] == "game_odds" for r in rows),
++                      "player_props": sum(r["kind"] == "player_prop" for r in rows)}))
++    gh = os.environ.get("GITHUB_OUTPUT")
++    if gh:
++        with open(gh, "a") as f:
++            f.write(f"file={out}\nweek={now.strftime('%G-W%V')}\nrows={len(rows)}\n")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/rank_and_stake.py b/scripts/rank_and_stake.py
+index cc2d5fc..f0b5093 100644
+--- a/scripts/rank_and_stake.py
++++ b/scripts/rank_and_stake.py
+@@ -15,7 +15,10 @@ import argparse, json
+ from collections import Counter
+ from pathlib import Path
+ 
+-from v13.ranking import monte_carlo, reliability, select, simulate, tau_for_target, walk_forward_score
++from v13.ranking import (STAKING, monte_carlo, parametric_monte_carlo, reliability, select, simulate,
++                         tau_for_target, walk_forward_score)
++
++SHRINKS = (1.0, 0.5, 0.25, 0.0)
+ 
+ TARGETS = (100, 150, 200, 250, 300)
+ 
+@@ -25,12 +28,12 @@ def read(path):
+ 
+ 
+ def run(candidates, validation_season=None, test_season=None, models=None, targets=TARGETS, mc_paths=10000,
+-        split_date=None):
++        split_date=None, grouping="market"):
+     """Seasons mode (preferred) or, when only one season has lines, split_date mode:
+     validation = scored candidates before split_date, test = on/after it (counts scale with window length)."""
+     if models:
+         candidates = [c for c in candidates if c.get("model_version") in models]
+-    scored, fits = walk_forward_score(candidates)
++    scored, fits = walk_forward_score(candidates, grouping=grouping)
+     if split_date:
+         pool = [c for c in scored if test_season is None or c.get("season") == test_season]
+         val = [c for c in pool if c["date"] < split_date]
+@@ -44,7 +47,7 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
+     if split_date:
+         days = lambda rows: len({c["date"] for c in rows})
+         scale = days(val) / max(days(test), 1)
+-    report = {"validation_season": validation_season, "test_season": test_season, "split_date": split_date,
++    report = {"grouping": grouping, "validation_season": validation_season, "test_season": test_season, "split_date": split_date,
+               "validation_to_test_day_ratio": round(scale, 3),
+               "scored_candidates": dict(Counter(c["market"] for c in scored)),
+               "calibration_fits_last_period": fits[max(fits)],
+@@ -54,14 +57,15 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
+     for n in targets:
+         tau = tau_for_target(val, max(1, round(n * scale)) if split_date else n)
+         chosen = select(test, tau)
+-        flat, tiered = simulate(chosen, "flat"), simulate(chosen, "tiered")
++        sims = {st: simulate(chosen, st) for st in STAKING}
++        flat = sims["flat"]
+         report["sweep"][str(n)] = {
+             "ev_lo_cutoff_from_validation": round(tau, 5),
+             "validation_count": len(select(val, tau)),
+-            "test": {"flat_1pct": {k: v for k, v in flat.items() if k != "ledger"},
+-                     "tiered": {k: v for k, v in tiered.items() if k != "ledger"},
+-                     "monte_carlo_flat": monte_carlo(flat["ledger"], "flat", mc_paths),
+-                     "monte_carlo_tiered": monte_carlo(tiered["ledger"], "tiered", mc_paths)},
++            "test": {**{f"{st}": {k: v for k, v in r.items() if k != "ledger"} for st, r in sims.items()},
++                     **{f"monte_carlo_{st}": monte_carlo(r["ledger"], st, mc_paths) for st, r in sims.items()}},
++            "sensitivity": {f"{st}_shrink_{k}": parametric_monte_carlo(chosen, k, st, max(1000, mc_paths // 2))
++                            for st in ("flat", "tiered") for k in SHRINKS},
+             "test_ledger_flat": flat["ledger"]}
+     return report
+ 
+@@ -74,19 +78,21 @@ def main():
+     p.add_argument("--test-season", type=int)
+     p.add_argument("--split-date", help="YYYY-MM-DD; single-season mode (weaker, exploratory)")
+     p.add_argument("--mc-paths", type=int, default=10000)
++    p.add_argument("--grouping", choices=("market", "pooled"), default="market")
+     p.add_argument("--out", required=True)
+     a = p.parse_args()
+     cands = [c for path in a.candidates for c in read(path)]
+     models = set(a.models.split(",")) if a.models else None
+     if not a.split_date and (a.validation_season is None or a.test_season is None):
+         raise SystemExit("Give --validation-season and --test-season, or --split-date")
+-    report = run(cands, a.validation_season, a.test_season, models, mc_paths=a.mc_paths, split_date=a.split_date)
++    report = run(cands, a.validation_season, a.test_season, models, mc_paths=a.mc_paths, split_date=a.split_date,
++                 grouping=a.grouping)
+     out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
+     out.write_text(json.dumps(report, indent=2, default=str) + "\n")
+     brief = {k: v for k, v in report.items() if k != "sweep"}
+     brief["sweep"] = {n: {"cutoff": s["ev_lo_cutoff_from_validation"], "validation_count": s["validation_count"],
+                           **{k: {kk: vv for kk, vv in s["test"][k].items() if kk not in ("by_tier", "by_market")}
+-                             for k in ("flat_1pct", "tiered")}} for n, s in report["sweep"].items()}
++                             for k in STAKING}} for n, s in report["sweep"].items()}
+     print(json.dumps(brief, indent=2, default=str))
+ 
+ 
+diff --git a/tests/test_ranking_and_game_v2.py b/tests/test_ranking_and_game_v2.py
+index 7575b7c..18dfea9 100644
+--- a/tests/test_ranking_and_game_v2.py
++++ b/tests/test_ranking_and_game_v2.py
+@@ -198,3 +198,33 @@ def test_prop_candidate_export_is_out_of_sample_and_two_sided():
+     scored, _ = walk_forward_score(cands)
+     res = simulate(select(scored, 0.0), "flat")
+     assert res["bets"] == 0 or res["roi_on_turnover_pct"] < 10  # fairly priced synthetic market
++
++
++def test_pooled_grouping_and_staking_variants():
++    from v13.ranking import stake_fraction, parametric_monte_carlo
++    rng = random.Random(9)
++    cands = []
++    for i in range(3000):
++        truth = rng.uniform(0.35, 0.65); win = rng.random() < truth
++        for mkt in ("a", "b"):
++            c = _cand(i, truth, win, day=f"2026-{1 + i // 600:02d}-{1 + i % 28:02d}", game=f"g{i}{mkt}", market=mkt)
++            c["candidate_id"] = f"{i}{mkt}"
++            cands.append(c)
++    pooled, fits = walk_forward_score(cands, grouping="pooled")
++    assert pooled and all("pooled|all" in f or not f for f in fits.values())
++    b = {"tier_stake": 0.03}
++    assert stake_fraction(b, "flat") == 0.01 and stake_fraction(b, "capped") == 0.02
++    assert stake_fraction(b, "half") == pytest.approx(0.015)
++    chosen = select(pooled, -1.0)[:200]
++    for c in chosen:
++        c["p_market"] = 0.5238 if c.get("p_market") is None else c["p_market"]
++    zero = parametric_monte_carlo(chosen, 0.0, "flat", paths=300)
++    assert zero["prob_below_start"] > 0.5  # with no real edge, the vig wins
++
++
++def test_feasibility_zero_edge_loses_and_big_edge_wins():
++    from scripts.bankroll_feasibility import simulate as fsim
++    none = fsim(200, [(-110, -110)], [(0.01, 1.0)], 0.0, paths=2000)
++    big = fsim(200, [(-110, -110)], [(0.02, 1.0)], 0.10, paths=2000)
++    assert none["median_end"] < 10000 and none["mean_roi_pct"] < 0
++    assert big["prob_ge_15000"] > 0.5
+diff --git a/tests/test_round4.py b/tests/test_round4.py
+new file mode 100644
+index 0000000..a19cb5c
+--- /dev/null
++++ b/tests/test_round4.py
+@@ -0,0 +1,74 @@
++import random
++from datetime import date, timedelta
++
++import scripts.log_live_odds as logger
++from scripts.cross_market_consistency import build, run
++
++
++def consistency_world(seed=0, games=500, stale=1.5):
++    rng = random.Random(seed)
++    teams = {t: [rng.uniform(6, 26) for _ in range(5)] for t in range(1, 9)}
++    G, ODDS, PROPS, STATS = [], [], [], []
++    for i in range(games):
++        day = (date(2025, 10, 22) + timedelta(days=i // 3)).isoformat()
++        h, a = rng.sample(sorted(teams), 2)
++        gid = i + 1
++        pts = {}
++        for team in (h, a):
++            shade = rng.choice((-stale, 0.0, stale))  # the props desk is stale for this team-game
++            total = 0
++            for k, mu in enumerate(teams[team]):
++                pid = team * 100 + k
++                x = max(0, round(rng.gauss(mu, 5)))
++                total += x
++                STATS.append({"pts": x, "player": {"id": pid}, "team": {"id": team}, "game": {"id": gid, "date": day}})
++                PROPS.append({"id": len(PROPS), "game_id": gid, "player_id": pid, "vendor": "caesars", "prop_type": "points",
++                              "line_value": str(round(mu + shade) + 0.5), "opened_at": day + "T15:00:00Z",
++                              "market": {"type": "over_under", "over_odds": -110, "under_odds": -110}})
++            pts[team] = total
++        exp_h, exp_a = sum(teams[h]), sum(teams[a])
++        G.append({"id": gid, "date": day, "datetime": day + "T23:00:00Z", "home_team": {"id": h}, "visitor_team": {"id": a},
++                  "home_team_score": pts[h], "visitor_team_score": pts[a], "status": "Final"})
++        ODDS.append({"id": gid, "game_id": gid, "vendor": "draftkings", "opened_at": day + "T14:00:00Z",
++                     "spread_home_value": str(-(exp_h - exp_a)), "total_value": str(exp_h + exp_a)})
++    # warm-up rows so players have a team before their first scored game
++    for team, mus in teams.items():
++        for k in range(5):
++            STATS.append({"pts": 0, "player": {"id": team * 100 + k}, "team": {"id": team}, "game": {"id": -team, "date": "2025-10-01"}})
++    return G, ODDS, PROPS, STATS
++
++
++def test_consistency_detects_stale_props():
++    rows = build(*consistency_world())
++    res = run(rows, min_train=100)
++    assert res["team_games_scored"] > 100
++    assert res["corr_gap_with_player_points_minus_lines"] > 0.2
++    assert res["rule_bets"] > 50 and res["rule_roi_flat_pct"] > 0
++
++
++def test_consistency_no_edge_when_props_are_right():
++    res = run(build(*consistency_world(seed=1, stale=0.0)), min_train=100)
++    assert res["rule_roi_flat_pct"] is None or res["rule_roi_flat_pct"] < 8
++
++
++def test_live_logger_stamps_rows():
++    class Resp:
++        status_code = 200
++        def __init__(self, payload): self.payload = payload
++        def json(self): return self.payload
++        def raise_for_status(self): pass
++    class Session:
++        def get(self, url, params=None, headers=None, timeout=None):
++            if url.endswith("/v1/games"):
++                return Resp({"data": [{"id": 5, "status_state": "scheduled", "datetime": "2026-10-21T23:30:00Z"}], "meta": {}})
++            if url.endswith("/nba/v2/odds"):
++                return Resp({"data": [{"game_id": 5, "vendor": "dk", "total_value": "221.5"}], "meta": {}})
++            return Resp({"data": [{"game_id": 5, "player_id": 9, "prop_type": "points"}]})
++    original = logger.requests.Session
++    logger.requests.Session = Session
++    try:
++        rows, n = logger.snapshot("k")
++    finally:
++        logger.requests.Session = original
++    assert n == 1 and len(rows) == 2
++    assert all(r["retrieved_at_utc"] and r["tip_utc"] == "2026-10-21T23:30:00Z" for r in rows)
+diff --git a/v13/ranking.py b/v13/ranking.py
+index 20474ec..3e17258 100644
+--- a/v13/ranking.py
++++ b/v13/ranking.py
+@@ -111,8 +111,13 @@ def prepare(candidates):
+     return sorted(out, key=lambda c: (c["date"], str(c["game_id"]), c["market"], str(c.get("player_id")), c["side"]))
+ 
+ 
+-def walk_forward_score(candidates, refit="month", **cal_kwargs):
+-    """Score every candidate with calibrators fitted only on candidates dated before its period."""
++def walk_forward_score(candidates, refit="month", grouping="market", **cal_kwargs):
++    """Score every candidate with calibrators fitted only on candidates dated before its period.
++
++    grouping="market": one calibrator per (market, model_version) [default].
++    grouping="pooled": one calibrator for all markets (Experiment B comparison).
++    """
++    key = (lambda c: (c["market"], c.get("model_version"))) if grouping == "market" else (lambda c: ("pooled", "all"))
+     cands = prepare(candidates)
+     period = (lambda d: d[:7]) if refit == "month" else (lambda d: d)
+     periods = sorted({period(c["date"]) for c in cands})
+@@ -122,13 +127,13 @@ def walk_forward_score(candidates, refit="month", **cal_kwargs):
+         past = [c for c in cands if c["date"] < start]
+         bymarket = defaultdict(list)
+         for c in past:
+-            bymarket[(c["market"], c.get("model_version"))].append(c)
++            bymarket[key(c)].append(c)
+         cals = {m: Calibrator(**cal_kwargs).fit(rows) for m, rows in bymarket.items()}
+         fits[per] = {f"{m}|{v}": cal.describe() for (m, v), cal in cals.items()}
+         for c in cands:
+             if period(c["date"]) != per:
+                 continue
+-            cal = cals.get((c["market"], c.get("model_version")))
++            cal = cals.get(key(c))
+             p, p_lo = cal.predict(c) if cal else (None, None)
+             if p is None:
+                 continue
+@@ -181,8 +186,25 @@ def select(scored, tau, per_game=2, per_player_game=1, daily_exposure=0.06, unit
+     return chosen
+ 
+ 
++STAKING = ("flat", "tiered", "capped", "half")
++
++
++def stake_fraction(b, staking, unit=0.01):
++    """flat: 1% | tiered: 1/2/3% | capped: tiers capped at 2% | half: 0.5/1/1.5%."""
++    if staking == "flat":
++        return unit
++    t = b["tier_stake"]
++    if staking == "tiered":
++        return t
++    if staking == "capped":
++        return min(t, 0.02)
++    if staking == "half":
++        return t / 2
++    raise ValueError(staking)
++
++
+ def simulate(bets, staking="flat", bankroll=10000.0, unit=0.01):
+-    """Day-start staking. staking='flat' (1%) or 'tiered' (tier_stake)."""
++    """Day-start staking: every bet on a date is sized from the bankroll before that date's results."""
+     led, peak, streak, worst_streak = [], bankroll, 0, 0
+     byday = defaultdict(list)
+     for b in bets:
+@@ -190,8 +212,7 @@ def simulate(bets, staking="flat", bankroll=10000.0, unit=0.01):
+     for day in sorted(byday):
+         start = bankroll
+         for b in byday[day]:
+-            frac = unit if staking == "flat" else b["tier_stake"]
+-            stake = round(start * frac, 2)
++            stake = round(start * stake_fraction(b, staking, unit), 2)
+             o = b["outcome"]
+             pnl = round(stake * (profit_per_unit(b["price"]) if o == "win" else -1 if o == "loss" else 0), 2)
+             bankroll = round(bankroll + pnl, 2)
+@@ -259,9 +280,8 @@ def monte_carlo(ledger, staking="flat", paths=10000, seed=7, unit=0.01, bankroll
+         for i in rng.integers(0, len(days), len(days)):
+             start = bank
+             for b in days[i]:
+-                frac = unit if staking == "flat" else b["tier_stake"]
+                 o = b["outcome"]
+-                bank += start * frac * (profit_per_unit(b["price"]) if o == "win" else -1 if o == "loss" else 0)
++                bank += start * stake_fraction(b, staking, unit) * (profit_per_unit(b["price"]) if o == "win" else -1 if o == "loss" else 0)
+             peak = max(peak, bank); mdd = max(mdd, (peak - bank) / peak)
+         ends.append(bank); dds.append(mdd)
+     ends, dds = np.array(ends), np.array(dds)
+@@ -292,3 +312,37 @@ def reliability(scored, bins=10):
+         out["brier_market"] = round(sum((c["p_market"] - yy) ** 2 for c, yy in zip(rows, y)) / len(y), 5)
+         out["logloss_market"] = round(ll([c["p_market"] for c in rows]), 5)
+     return out
++
++
++def parametric_monte_carlo(bets, shrink=1.0, staking="flat", paths=5000, seed=11, unit=0.01, bankroll=10000.0):
++    """Sensitivity to weaker-than-estimated edge, keeping the real bet/price/day structure.
++
++    True win probability of each bet = p_market + shrink * (p - p_market):
++    shrink=1 -> our calibrated model is exactly right; 0.5 -> half the estimated edge is real;
++    0 -> the market is right (expected loss = the vig). Outcomes are re-drawn; pushes ignored.
++    """
++    rows = [b for b in bets if b.get("p_market") is not None and b.get("p") is not None]
++    if not rows:
++        return None
++    rng = np.random.default_rng(seed)
++    byday = defaultdict(list)
++    for b in rows:
++        byday[b["date"]].append(b)
++    days = [byday[d] for d in sorted(byday)]
++    ends, dds = [], []
++    for _ in range(paths):
++        bank, peak, mdd = bankroll, bankroll, 0.0
++        for day in days:
++            start = bank
++            for b in day:
++                p_true = min(max(b["p_market"] + shrink * (b["p"] - b["p_market"]), 0.0), 1.0)
++                win = rng.random() < p_true
++                bank += start * stake_fraction(b, staking, unit) * (profit_per_unit(b["price"]) if win else -1)
++            peak = max(peak, bank); mdd = max(mdd, (peak - bank) / peak)
++        ends.append(bank); dds.append(mdd)
++    ends, dds = np.array(ends), np.array(dds)
++    return {"shrink": shrink, "staking": staking, "mean_end": round(float(ends.mean())),
++            "p50": round(float(np.median(ends))), "prob_ge_15000": round(float((ends >= 15000).mean()), 4),
++            "prob_below_start": round(float((ends < bankroll).mean()), 4),
++            "median_max_drawdown_pct": round(100 * float(np.median(dds)), 2),
++            "p95_max_drawdown_pct": round(100 * float(np.percentile(dds, 95)), 2)}
+-- 
+2.43.0
+
+
+From bcc6b82dc37216a289d6bf152d53a98fd1f17c53 Mon Sep 17 00:00:00 2001
+From: Claude audit <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 15:59:20 -0500
+Subject: [PATCH 4/4] Round 5: Experiment A runner (frozen pre-registration),
+ power de-vig, winner's-curse check on selected bets
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ scripts/prereg_threes_unders_2024.py | 108 +++++++++++++++++++++++++++
+ scripts/rank_and_stake.py            |  24 ++++++
+ tests/test_round4.py                 |  27 +++++++
+ v13/pricing.py                       |  17 +++++
+ 4 files changed, 176 insertions(+)
+ create mode 100644 scripts/prereg_threes_unders_2024.py
+
+diff --git a/scripts/prereg_threes_unders_2024.py b/scripts/prereg_threes_unders_2024.py
+new file mode 100644
+index 0000000..927dc4e
+--- /dev/null
++++ b/scripts/prereg_threes_unders_2024.py
+@@ -0,0 +1,108 @@
++"""Experiment A: frozen 2024-25 three-point UNDERS replication (PREREG_THREES_UNDERS.md).
++
++Selection is the LEGACY pipeline, unchanged: scripts.backtest_prop_holdout.evaluate
++(same normalize_lines, features, Ridge(alpha=25), scaling, 65/35 date split, threshold grid
++[0.5, 1.0, 1.5], train-only threshold choice). Bets are then graded, never re-selected:
++  - only bets whose source line was opened strictly before tip are counted;
++  - each bet is paid at its recorded side-specific opening price;
++  - fair probability under BOTH multiplicative and power de-vig.
++The frozen pass rule is applied mechanically and written into the output.
++
++python -m scripts.prereg_threes_unders_2024 --features props_2024.jsonl \
++  --lines opening_threes_2024.jsonl --games games_2024.jsonl --out research_results/prereg/threes_unders_2024.json
++"""
++import argparse, json, math
++from collections import Counter
++from pathlib import Path
++
++from scripts.backtest_prop_holdout import evaluate as legacy_evaluate, normalize_lines
++from v13.pricing import (no_vig_pair, power_devig_pair, pregame_status, profit_per_unit, prop_prices,
++                         tip_times, wilson)
++
++PASS_RULE = {"min_unders": 150, "min_roi": 0.0, "min_excess": 0.02, "min_z": 2.0}
++
++
++def read(path):
++    return [json.loads(x) for x in Path(path).open() if x.strip()]
++
++
++def grade(bets):
++    decided = [b for b in bets if b["outcome"] in ("win", "loss")]
++    n = len(decided); w = sum(b["outcome"] == "win" for b in decided)
++    out = {"bets": len(bets), "decided": n, "wins": w, "losses": n - w, "pushes": len(bets) - n,
++           "hit_rate": round(w / n, 4) if n else None, "hit_95ci": wilson(w, n)}
++    if not n:
++        return out
++    pnl = sum(profit_per_unit(b["price"]) if b["outcome"] == "win" else -1 for b in decided)
++    out["roi_actual_price_pct"] = round(100 * pnl / n, 2)
++    for name, key in (("multiplicative", "p_mult"), ("power", "p_power")):
++        exp = sum(b[key] for b in decided); var = sum(b[key] * (1 - b[key]) for b in decided)
++        out[name] = {"expected_hit_rate": round(exp / n, 4), "excess": round((w - exp) / n, 4),
++                     "z": round((w - exp) / math.sqrt(var), 2) if var > 0 else None}
++    return out
++
++
++def run(features, lines, games):
++    report = legacy_evaluate(features, lines)  # selection exactly as frozen
++    threes = report["markets"].get("threes") or {}
++    if threes.get("status") != "evaluated":
++        return {"verdict": "UNTESTABLE", "reason": f"legacy pipeline did not evaluate threes: {threes}"}
++    chosen = normalize_lines(lines)
++    tips = tip_times(games)
++    integrity, bets = Counter(), []
++    for b in threes["ridge_holdout_ledger"]:
++        found = chosen.get((str(b["game_id"]), str(b["player_id"]), "threes"))
++        if found is None or abs(float(found[1]) - float(b["line"])) > 1e-9:
++            integrity["unmatched_source_row"] += 1; continue
++        row = found[0]
++        status = pregame_status(row.get("opened_at"), tips.get(str(b["game_id"])))
++        if status != "pregame":
++            integrity[f"excluded_{status}"] += 1; continue
++        over, under = prop_prices(row)
++        if over is None or under is None:
++            integrity["excluded_missing_price"] += 1; continue
++        mo, mu = no_vig_pair(over, under); po, pu = power_devig_pair(over, under)
++        side = b["side"]
++        bets.append({**b, "price": over if side == "over" else under,
++                     "p_mult": mo if side == "over" else mu, "p_power": po if side == "over" else pu})
++        integrity["graded"] += 1
++    unders = [b for b in bets if b["side"] == "under"]
++    primary = grade(unders)
++    checks = {
++        "unders_n_ge_150": primary["decided"] >= PASS_RULE["min_unders"],
++        "roi_gt_0": (primary.get("roi_actual_price_pct") or -1) > PASS_RULE["min_roi"],
++        "excess_ge_2pts_multiplicative": (primary.get("multiplicative") or {}).get("excess", -1) >= PASS_RULE["min_excess"],
++        "excess_ge_2pts_power": (primary.get("power") or {}).get("excess", -1) >= PASS_RULE["min_excess"],
++        "z_ge_2_multiplicative": ((primary.get("multiplicative") or {}).get("z") or -9) >= PASS_RULE["min_z"],
++        "z_ge_2_power": ((primary.get("power") or {}).get("z") or -9) >= PASS_RULE["min_z"],
++    }
++    verified_share = integrity["graded"] / max(1, len(threes["ridge_holdout_ledger"]))
++    if verified_share < 0.9:
++        verdict = "UNTESTABLE"  # pre-registration: insufficient integrity is not a pass
++    else:
++        verdict = "PASS" if all(checks.values()) else "FAIL"
++    return {"experiment": "A_threes_unders_2024_25", "preregistration": "PREREG_THREES_UNDERS.md",
++            "verdict": verdict, "checks": checks, "pass_rule": PASS_RULE,
++            "selection": {"holdout_start": report["holdout_start"], "chosen_threshold": threes["chosen_edge_threshold"],
++                          "legacy_holdout_record_at_-110": threes["ridge_holdout"]},
++            "integrity": dict(integrity), "verified_share": round(verified_share, 4),
++            "primary_unders": primary, "secondary_overs": grade([b for b in bets if b["side"] == "over"]),
++            "secondary_all": grade(bets),
++            "descriptive_only_by_price": {f"{lo}..{hi}": grade([b for b in unders if lo <= b["price"] < hi])
++                                          for lo, hi in ((-10000, -200), (-200, -150), (-150, -100), (100, 10000))}}
++
++
++def main():
++    p = argparse.ArgumentParser()
++    for k in ("features", "lines", "games", "out"):
++        p.add_argument(f"--{k}", required=True)
++    a = p.parse_args()
++    result = run(read(a.features), read(a.lines), read(a.games))
++    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
++    Path(a.out).write_text(json.dumps(result, indent=2) + "\n")
++    print(json.dumps({k: v for k, v in result.items() if k != "descriptive_only_by_price"}, indent=2))
++    print(f"VERDICT: {result['verdict']}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/rank_and_stake.py b/scripts/rank_and_stake.py
+index f0b5093..60eff39 100644
+--- a/scripts/rank_and_stake.py
++++ b/scripts/rank_and_stake.py
+@@ -20,6 +20,28 @@ from v13.ranking import (STAKING, monte_carlo, parametric_monte_carlo, reliabili
+ 
+ SHRINKS = (1.0, 0.5, 0.25, 0.0)
+ 
++
++def selection_calibration(chosen):
++    """Winner's-curse check: do the SELECTED bets win as often as the engine predicted?
++
++    Calibration fitted on all candidates can be right on average yet overconfident in the
++    extreme tail where selection happens. Compare predicted vs realized on the chosen set."""
++    d = [c for c in chosen if c["outcome"] in ("win", "loss")]
++    if not d:
++        return None
++    from v13.pricing import profit_per_unit
++    hit = sum(c["outcome"] == "win" for c in d) / len(d)
++    roi = sum(profit_per_unit(c["price"]) if c["outcome"] == "win" else -1 for c in d) / len(d)
++    p_hat = sum(c["p"] for c in d) / len(d)
++    p_mkt = [c["p_market"] for c in d if c.get("p_market") is not None]
++    return {"n": len(d), "predicted_hit": round(p_hat, 4), "realized_hit": round(hit, 4),
++            "predicted_ev_pct": round(100 * sum(c["ev"] for c in d) / len(d), 2), "realized_roi_pct": round(100 * roi, 2),
++            "market_hit": round(sum(p_mkt) / len(p_mkt), 4) if p_mkt else None,
++            "realized_edge_share": round((hit - sum(p_mkt) / len(p_mkt)) / (p_hat - sum(p_mkt) / len(p_mkt)), 3)
++            if p_mkt and abs(p_hat - sum(p_mkt) / len(p_mkt)) > 1e-6 else None,
++            "reading_guide": "realized_edge_share ~1 = edge as predicted; ~0 = none of the predicted edge was real; "
++                             "use it as the shrink factor in the sensitivity block."}
++
+ TARGETS = (100, 150, 200, 250, 300)
+ 
+ 
+@@ -64,6 +86,8 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
+             "validation_count": len(select(val, tau)),
+             "test": {**{f"{st}": {k: v for k, v in r.items() if k != "ledger"} for st, r in sims.items()},
+                      **{f"monte_carlo_{st}": monte_carlo(r["ledger"], st, mc_paths) for st, r in sims.items()}},
++            "selected_bets_calibration_test": selection_calibration(chosen),
++            "selected_bets_calibration_validation": selection_calibration(select(val, tau)),
+             "sensitivity": {f"{st}_shrink_{k}": parametric_monte_carlo(chosen, k, st, max(1000, mc_paths // 2))
+                             for st in ("flat", "tiered") for k in SHRINKS},
+             "test_ledger_flat": flat["ledger"]}
+diff --git a/tests/test_round4.py b/tests/test_round4.py
+index a19cb5c..2d517b4 100644
+--- a/tests/test_round4.py
++++ b/tests/test_round4.py
+@@ -72,3 +72,30 @@ def test_live_logger_stamps_rows():
+         logger.requests.Session = original
+     assert n == 1 and len(rows) == 2
+     assert all(r["retrieved_at_utc"] and r["tip_utc"] == "2026-10-21T23:30:00Z" for r in rows)
++
++
++def test_power_devig_and_prereg_runner():
++    from v13.pricing import power_devig_pair, no_vig_pair
++    po, pu = power_devig_pair(-178, 140)
++    assert abs(po + pu - 1) < 1e-9
++    mo, mu = no_vig_pair(-178, 140)
++    assert po > mo  # power gives the favourite more fair probability
++    from tests.test_pricing_and_v2 import synthetic_season
++    from scripts.prereg_threes_unders_2024 import run as prereg
++    feats, lines, games = synthetic_season(6, priced=True)
++    # one line opened after tip must be excluded, never graded
++    lines[-1]["opened_at"] = "2099-01-01T00:00:00Z"
++    out = prereg(feats, lines, games)
++    assert out["verdict"] in ("PASS", "FAIL", "UNTESTABLE")
++    assert set(out["checks"]) == {"unders_n_ge_150", "roi_gt_0", "excess_ge_2pts_multiplicative",
++                                  "excess_ge_2pts_power", "z_ge_2_multiplicative", "z_ge_2_power"}
++    assert "power" in out["primary_unders"] or out["primary_unders"]["decided"] == 0
++    assert out["verdict"] != "PASS"  # fairly priced synthetic market has no edge
++
++
++def test_selection_calibration_reports():
++    from scripts.rank_and_stake import selection_calibration
++    rows = [{"outcome": "win" if i % 2 else "loss", "price": -110, "p": 0.56, "ev": 0.07, "p_market": 0.5}
++            for i in range(100)]
++    r = selection_calibration(rows)
++    assert r["realized_hit"] == 0.5 and abs(r["realized_edge_share"]) < 1e-9
+diff --git a/v13/pricing.py b/v13/pricing.py
+index 1370e74..5f5fee5 100644
+--- a/v13/pricing.py
++++ b/v13/pricing.py
+@@ -108,3 +108,20 @@ def wilson(wins, n, z=1.96):
+     centre = (p + z * z / (2 * n)) / denom
+     half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+     return round(centre - half, 4), round(centre + half, 4)
++
++
++def power_devig_pair(odds_a, odds_b):
++    """Power de-vig: find k with pa^k + pb^k = 1 (pa, pb raw implied). Assigns more of the
++    margin to the longshot than multiplicative de-vig does (favourite-longshot bias)."""
++    pa, pb = implied_probability(odds_a), implied_probability(odds_b)
++    if pa + pb <= 1:
++        return pa / (pa + pb), pb / (pa + pb)
++    lo, hi = 1.0, 10.0
++    for _ in range(100):
++        k = (lo + hi) / 2
++        if pa ** k + pb ** k > 1:
++            lo = k
++        else:
++            hi = k
++    k = (lo + hi) / 2
++    return pa ** k, pb ** k
+-- 
+2.43.0
+

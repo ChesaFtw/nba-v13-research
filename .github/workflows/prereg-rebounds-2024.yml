@@ -1,0 +1,51 @@
+name: V13 Pre-registered 2024-25 rebounds replication
+on:
+  workflow_dispatch:
+  push:
+    paths: ['experiments/rebounds-2024.trigger']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  rebounds-2024:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LINES_RUN: '38614396898'
+      FEATURES_RUN: '38614413903'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Refuse to run unless PREREG_REBOUNDS_2024.md is already committed
+        run: test -f PREREG_REBOUNDS_2024.md && git log --oneline -1 -- PREREG_REBOUNDS_2024.md
+      - name: Download 2024-25 games index and pregame features
+        run: |
+          gh run download "$LINES_RUN" -n v13-full-2024-threes-lines -D in/lines
+          gh run download "$FEATURES_RUN" -n v13-2024-player-prop-features -D in/features
+      - name: Collect ALL 2024-25 opening props (two-sided)
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.collect_season_prop_openings --games "$(find in/lines -name games.jsonl | head -1)" --out research_results/prereg_reb/opening_props_2024.jsonl
+      - name: Prop coverage audit (pre-tip, prices)
+        run: |
+          python -u -m scripts.odds_coverage_audit --kind prop --season 2024 --games "$(find in/lines -name games.jsonl | head -1)" \
+            --odds research_results/prereg_reb/opening_props_2024.jsonl --out research_results/prereg_reb/prop_coverage_2024.json
+      - name: Frozen replication (v2 pipeline unchanged; rebounds, edge selector)
+        run: |
+          python -u -m scripts.prereg_v2_market --market rebounds --selector edge \
+            --features "$(find in/features -name props_2024.jsonl | head -1)" \
+            --lines research_results/prereg_reb/opening_props_2024.jsonl \
+            --games "$(find in/lines -name games.jsonl | head -1)" \
+            --out research_results/prereg_reb/rebounds_2024.json
+          sha256sum research_results/prereg_reb/opening_props_2024.jsonl > research_results/prereg_reb/inputs_sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-prereg-rebounds-2024
+          path: research_results/prereg_reb/
+          retention-days: 90

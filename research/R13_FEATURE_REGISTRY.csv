@@ -1,0 +1,311 @@
+id,family,feature,feasibility,feasibility_meaning,note
+1,1 Minutes & opportunity,"Last 3, 5, 10, 20-game minutes, exponentially weighted.",A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+2,1 Minutes & opportunity,Minutes adjusted for overtime.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+3,1 Minutes & opportunity,Minutes excluding games with injury-related restrictions.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",restrictions are news; no timestamped history
+4,1 Minutes & opportunity,Starting versus bench role.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),starter flag absent in /v1/stats; proxy = top-5 minutes last game; exact starters via /nba/v1/lineups 2025+ for prior games
+5,1 Minutes & opportunity,Minutes after a recent starting-lineup promotion.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),starter flag absent in /v1/stats; proxy = top-5 minutes last game; exact starters via /nba/v1/lineups 2025+ for prior games
+6,1 Minutes & opportunity,Minutes following a teammate's injury.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,absence known only via 'did not play in team's previous game' (pregame-safe proxy)
+7,1 Minutes & opportunity,Minutes following a teammate's return.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,absence known only via 'did not play in team's previous game' (pregame-safe proxy)
+8,1 Minutes & opportunity,Minutes when a specific teammate is absent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,absence known only via 'did not play in team's previous game' (pregame-safe proxy)
+9,1 Minutes & opportunity,Minutes when multiple rotation players are absent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+10,1 Minutes & opportunity,Coach-specific rotation patterns.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),no coach field; team-season proxy only (coach changes not identified)
+11,1 Minutes & opportunity,Coach-specific substitution timing.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",needs substitution events
+12,1 Minutes & opportunity,First-half versus second-half playing time.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",needs substitution events
+13,1 Minutes & opportunity,Close-game versus blowout minutes.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",pregame spread required; historical blowout margin is post-game (leakage)
+14,1 Minutes & opportunity,Foul-trouble susceptibility.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+15,1 Minutes & opportunity,Minutes restrictions after injury.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",restrictions are news; no timestamped history
+16,1 Minutes & opportunity,Minutes after extended absence.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+17,1 Minutes & opportunity,Rookie minutes progression.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),years since draft; no birth date in BDL
+18,1 Minutes & opportunity,Veteran workload management.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),years since draft; no birth date in BDL
+19,1 Minutes & opportunity,Back-to-back minute reductions.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+20,1 Minutes & opportunity,Three-games-in-four-nights workload.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+21,1 Minutes & opportunity,Four-games-in-six-nights workload.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+22,1 Minutes & opportunity,Home/away rotation differences.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+23,1 Minutes & opportunity,Minutes against small-ball versus traditional lineups.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),opponent minutes-weighted size from prior games; true small-ball lineups need PBP (C)
+24,1 Minutes & opportunity,Minutes in particular defensive assignments.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"matchup_* fields are per-player aggregates, no defender identity"
+25,1 Minutes & opportunity,Projected competitive-game probability.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",pregame spread required; historical blowout margin is post-game (leakage)
+26,1 Minutes & opportunity,Rotation tightening near playoffs.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+27,1 Minutes & opportunity,Tanking/developmental rotation changes.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),standings from game results; 'tanking' intent unobservable
+28,1 Minutes & opportunity,Trade-deadline rotation disruptions.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+29,1 Minutes & opportunity,Starting lineup continuity.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),top-5 overlap across games; exact via lineups 2025+
+30,1 Minutes & opportunity,Position-specific depth-chart competition.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),listed position + minutes depth
+31,2 Physical & matchups,Player height.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+32,2 Physical & matchups,Player weight.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+33,2 Physical & matchups,"Wingspan, where reliable.",X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no reliable wingspan/reach source for all players
+34,2 Physical & matchups,"Standing reach, where available.",X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no reliable wingspan/reach source for all players
+35,2 Physical & matchups,Age.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),years since draft (no birth date)
+36,2 Physical & matchups,NBA experience.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+37,2 Physical & matchups,Positional size advantage.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,prior-game minutes-weighted opponent size by position
+38,2 Physical & matchups,Weight advantage against primary defender.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
+39,2 Physical & matchups,Height advantage against primary defender.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
+40,2 Physical & matchups,Wingspan mismatch.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
+41,2 Physical & matchups,Opponent center size.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+42,2 Physical & matchups,Opponent frontcourt average height.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+43,2 Physical & matchups,Opponent frontcourt average weight.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+44,2 Physical & matchups,Opponent lineup average size.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,prior-game minutes-weighted opponent size by position
+45,2 Physical & matchups,Opponent lineup rebounding strength.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+46,2 Physical & matchups,Speed and mobility mismatch proxies.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,speed/distance (weak proxy for mobility)
+47,2 Physical & matchups,Guard versus big switches.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,switches_on (per-player count)
+48,2 Physical & matchups,Post-up mismatch frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",post-up frequency only as season aggregates (not point-in-time)
+49,2 Physical & matchups,Defensive switch frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,switches_on (per-player count)
+50,2 Physical & matchups,Expected primary defender.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
+51,2 Physical & matchups,Historical production against that defender.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
+52,2 Physical & matchups,Defensive matchup duration.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
+53,2 Physical & matchups,Likelihood of cross-matching.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
+54,2 Physical & matchups,Opponent rim protection.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"defended_at_rim_*, contested_*, pct_pts_paint"
+55,2 Physical & matchups,Opponent perimeter containment.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"defended_at_rim_*, contested_*, pct_pts_paint"
+56,2 Physical & matchups,Defensive foul tendency.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+57,2 Physical & matchups,Physicality and free-throw generation.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+58,2 Physical & matchups,Size combined with opponent missed shots.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+59,2 Physical & matchups,Size combined with minutes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+60,2 Physical & matchups,Size combined with opponent shot location.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"defended_at_rim_*, contested_*, pct_pts_paint"
+61,3 Rebounding,Opponent field-goal attempts.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+62,3 Rebounding,Opponent field-goal percentage.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+63,3 Rebounding,Opponent expected missed shots.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+64,3 Rebounding,Opponent three-point attempt rate.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+65,3 Rebounding,Long-rebound opportunity rate.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),opponent 3PA rate as long-rebound proxy
+66,3 Rebounding,Opponent rim-attempt frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
+67,3 Rebounding,Opponent midrange frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
+68,3 Rebounding,Team defensive rebound opportunities.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+69,3 Rebounding,Team offensive rebound opportunities.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+70,3 Rebounding,Individual rebound chances per minute.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
+71,3 Rebounding,Contested rebound chances.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",contested/uncontested rebound split not in API field list
+72,3 Rebounding,Uncontested rebound chances.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",contested/uncontested rebound split not in API field list
+73,3 Rebounding,Rebound conversion rate.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
+74,3 Rebounding,Box-out frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
+75,3 Rebounding,Teammate rebound competition.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+76,3 Rebounding,Rebounds when starting center is absent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,positional teammate absent in previous game
+77,3 Rebounding,Rebounds when power forward is absent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,positional teammate absent in previous game
+78,3 Rebounding,Opponent offensive rebounding strength.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+79,3 Rebounding,Opponent second-chance opportunities.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
+80,3 Rebounding,Small-ball lineup effects.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",lineups/shot distance from PBP
+81,3 Rebounding,Zone defense effects.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no zone/scheme labels
+82,3 Rebounding,Defensive scheme effects on rebound positioning.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no zone/scheme labels
+83,3 Rebounding,Rebound opportunity by shot distance.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",lineups/shot distance from PBP
+84,3 Rebounding,Rebound share by lineup combination.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",lineups/shot distance from PBP
+85,3 Rebounding,Player-specific offensive versus defensive rebound split.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+86,3 Rebounding,Rebound chances versus actual rebounds.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
+87,3 Rebounding,Missed-shot volume conditional on pace.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+88,3 Rebounding,Rebound location tendencies.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",lineups/shot distance from PBP
+89,3 Rebounding,Opponent lineup spacing.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+90,3 Rebounding,Rebounding rate in close games.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",close-game expectation needs spread
+91,4 Threes,Three-point attempts per minute.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+92,4 Threes,Catch-and-shoot attempt rate.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
+93,4 Threes,Pull-up three-point attempt rate.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
+94,4 Threes,Corner three frequency.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering","shot coordinates from PBP, if present"
+95,4 Threes,Above-the-break frequency.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering","shot coordinates from PBP, if present"
+96,4 Threes,Wide-open attempts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"contested/uncontested FGA (all shots, not 3PT-specific)"
+97,4 Threes,Open attempts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"contested/uncontested FGA (all shots, not 3PT-specific)"
+98,4 Threes,Closely contested attempts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"contested/uncontested FGA (all shots, not 3PT-specific)"
+99,4 Threes,Defender proximity.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
+100,4 Threes,Opponent three-point attempts allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+101,4 Threes,Opponent corner threes allowed.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering","shot coordinates from PBP, if present"
+102,4 Threes,Opponent catch-and-shoot threes allowed.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
+103,4 Threes,Opponent pull-up threes allowed.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
+104,4 Threes,Opponent defensive scheme.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
+105,4 Threes,Opponent drop coverage.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
+106,4 Threes,Opponent switching frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,switches_on
+107,4 Threes,Opponent help-defense frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
+108,4 Threes,Opponent paint-collapse frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
+109,4 Threes,Opponent closeout effectiveness.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
+110,4 Threes,Teammate drive-and-kick creation.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"pct_assisted_3pt, passes"
+111,4 Threes,Potential three-point assists received.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
+112,4 Threes,Three-point volume when primary creator is absent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+113,4 Threes,Three-point volume with specific playmakers.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+114,4 Threes,Recent three-point attempt changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+115,4 Threes,Recent shooting accuracy relative to expected quality.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"contested/uncontested FGA (all shots, not 3PT-specific)"
+116,4 Threes,Opponent personnel available on perimeter.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+117,4 Threes,Home/away shooting splits.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+118,4 Threes,"Arena-specific shooting effects, if statistically defensible.",A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),"arena = home team; samples small, likely noise"
+119,4 Threes,Rest and fatigue effects on shooting.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+120,4 Threes,Shooting variance and regression to baseline.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+121,5 Assists,Potential assists per minute.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
+122,5 Assists,Actual assists per potential assist.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
+123,5 Assists,Teammate shooting quality.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+124,5 Assists,Teammate shooting availability.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+125,5 Assists,Expected teammate field-goal percentage.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+126,5 Assists,Player touches.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
+127,5 Assists,Time of possession.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
+128,5 Assists,Passes made.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
+129,5 Assists,Drives.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
+130,5 Assists,Drive-and-kick passes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
+131,5 Assists,Pick-and-roll ball-handler possessions.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
+132,5 Assists,Pick-and-roll efficiency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
+133,5 Assists,Assist chances with particular teammates.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",assist participants / shot locations / lineups from PBP
+134,5 Assists,Assist chances without primary point guard.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+135,5 Assists,Secondary playmaker role changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+136,5 Assists,Team pace.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),pace estimated from box score possessions; B has pace
+137,5 Assists,Opponent defensive assists allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+138,5 Assists,Opponent defensive scheme.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
+139,5 Assists,Opponent double-team frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
+140,5 Assists,Opponent trap frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
+141,5 Assists,Opponent help rotations.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
+142,5 Assists,Opponent switch frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
+143,5 Assists,Transition possessions.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
+144,5 Assists,Half-court creation rate.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
+145,5 Assists,Usage versus passing tradeoff.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),usage estimated from box score; B has usage_percentage
+146,5 Assists,Potential assist conversion under fatigue.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+147,5 Assists,Teammate shot-location distribution.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",assist participants / shot locations / lineups from PBP
+148,5 Assists,Opponent rim protection causing kickouts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
+149,5 Assists,Player turnover pressure.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+150,5 Assists,Assists by lineup combination.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",assist participants / shot locations / lineups from PBP
+151,6 Points,Field-goal attempts per minute.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+152,6 Points,Usage rate.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+153,6 Points,Usage changes with absent teammates.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+154,6 Points,Touches and time of possession.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+155,6 Points,Drives per minute.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+156,6 Points,Paint touches.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+157,6 Points,Post touches.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+158,6 Points,Catch-and-shoot opportunities.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+159,6 Points,Pull-up attempts.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+160,6 Points,Shot-location mix.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+161,6 Points,Rim attempts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+162,6 Points,Midrange attempts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+163,6 Points,Three-point attempts.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+164,6 Points,Free-throw attempts.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+165,6 Points,Free-throw rate.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+166,6 Points,Opponent foul tendency.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+167,6 Points,Primary defender foul tendency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+168,6 Points,Opponent rim protection.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+169,6 Points,Opponent paint defense.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+170,6 Points,Opponent midrange defense.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+171,6 Points,Opponent perimeter defense.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+172,6 Points,Defensive scheme versus player shot profile.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+173,6 Points,Transition opportunities.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+174,6 Points,Fast-break scoring.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+175,6 Points,Second-chance scoring.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+176,6 Points,Isolation possessions.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+177,6 Points,Pick-and-roll scoring.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+178,6 Points,Post-up scoring.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+179,6 Points,Recent shot-quality change.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+180,6 Points,Expected field-goal percentage.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+181,6 Points,True shooting regression.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+182,6 Points,Teammate spacing effects.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),teammate 3PA rate; star absent in previous game
+183,6 Points,Defensive attention with star teammate absent.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),teammate 3PA rate; star absent in previous game
+184,6 Points,Defensive attention with star teammate present.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+185,6 Points,Home/away effects after controlling for opponent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+186,6 Points,Rest effects on usage and efficiency.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+187,6 Points,Player-specific foul-drawing skill.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+188,6 Points,Opponent lineup defensive weaknesses.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+189,6 Points,Scoring versus specific defensive archetypes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
+190,6 Points,Player-specific shot creation under pressure.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
+191,7 Fatigue/rest/travel,Back-to-back games.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+192,7 Fatigue/rest/travel,Second night of back-to-back.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+193,7 Fatigue/rest/travel,Three games in four nights.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+194,7 Fatigue/rest/travel,Four games in six nights.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+195,7 Fatigue/rest/travel,Five games in eight nights.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+196,7 Fatigue/rest/travel,Total minutes in preceding seven days.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+197,7 Fatigue/rest/travel,Total minutes in preceding 14 days.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+198,7 Fatigue/rest/travel,Travel distance.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+199,7 Fatigue/rest/travel,Time-zone changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+200,7 Fatigue/rest/travel,East-to-west travel.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+201,7 Fatigue/rest/travel,West-to-east travel.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+202,7 Fatigue/rest/travel,Early local tipoffs.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+203,7 Fatigue/rest/travel,Days since last game.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+204,7 Fatigue/rest/travel,Days since last road game.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+205,7 Fatigue/rest/travel,Road-trip length.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+206,7 Fatigue/rest/travel,First game home after long trip.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+207,7 Fatigue/rest/travel,Altitude.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+208,7 Fatigue/rest/travel,Recent overtime workload.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+209,7 Fatigue/rest/travel,Recent high-usage workload.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+210,7 Fatigue/rest/travel,Age × fatigue interaction.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+211,7 Fatigue/rest/travel,Minutes × fatigue interaction.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+212,7 Fatigue/rest/travel,Fatigue × three-point accuracy.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+213,7 Fatigue/rest/travel,Fatigue × defensive activity.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, box outs"
+214,7 Fatigue/rest/travel,Fatigue × turnover rate.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
+215,7 Fatigue/rest/travel,Fatigue × rebounding effort.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, box outs"
+216,8 Form & momentum,Last 3-game production.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+217,8 Form & momentum,Last 5-game production.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+218,8 Form & momentum,Last 10-game production.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+219,8 Form & momentum,Exponentially weighted production.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+220,8 Form & momentum,Recent minutes changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+221,8 Form & momentum,Recent usage changes.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, rebound chances, contested-shot share"
+222,8 Form & momentum,Recent shot-attempt changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+223,8 Form & momentum,Recent potential-assist changes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists / coaching intent / play types not available
+224,8 Form & momentum,Recent rebound-chance changes.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, rebound chances, contested-shot share"
+225,8 Form & momentum,Recent three-point volume changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+226,8 Form & momentum,Recent shot-quality changes.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, rebound chances, contested-shot share"
+227,8 Form & momentum,Recent opponent-adjusted production.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+228,8 Form & momentum,Recent performance against strong defenses.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+229,8 Form & momentum,Recent performance against weak defenses.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+230,8 Form & momentum,Shooting percentage versus expected shooting.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, rebound chances, contested-shot share"
+231,8 Form & momentum,Free-throw attempt changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+232,8 Form & momentum,Role-change detection.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+233,8 Form & momentum,Structural break detection.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+234,8 Form & momentum,Persistent versus temporary form.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+235,8 Form & momentum,Regression-to-mean probabilities.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+236,8 Form & momentum,Recent coaching adjustments.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists / coaching intent / play types not available
+237,8 Form & momentum,Recent starting lineup changes.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),lineup change via top-5 minutes proxy; exact via lineups 2025+
+238,8 Form & momentum,Changes in offensive responsibilities.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, rebound chances, contested-shot share"
+239,8 Form & momentum,Recent play-type changes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists / coaching intent / play types not available
+240,8 Form & momentum,Whether recent trends are already incorporated into sportsbook lines.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",this is the market-information test itself
+241,9 Team systems,Team pace.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),possessions estimated; B pace
+242,9 Team systems,Opponent pace.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+243,9 Team systems,Projected possessions.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",projected possessions/game script from total and spread
+244,9 Team systems,Half-court versus transition rate.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"fast-break points, shot mix allowed, rim defense, switches"
+245,9 Team systems,Offensive efficiency.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+246,9 Team systems,Defensive efficiency.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+247,9 Team systems,Opponent shot profile allowed.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"fast-break points, shot mix allowed, rim defense, switches"
+248,9 Team systems,Opponent rim protection.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"fast-break points, shot mix allowed, rim defense, switches"
+249,9 Team systems,Opponent perimeter defense.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"fast-break points, shot mix allowed, rim defense, switches"
+250,9 Team systems,Opponent rebounding opportunities allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+251,9 Team systems,Opponent assists allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+252,9 Team systems,Opponent three-point volume allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+253,9 Team systems,Opponent free throws allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+254,9 Team systems,Defensive scheme.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
+255,9 Team systems,Switching frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"fast-break points, shot mix allowed, rim defense, switches"
+256,9 Team systems,Zone frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
+257,9 Team systems,Drop coverage.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
+258,9 Team systems,Blitz and trap frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
+259,9 Team systems,Defensive matchups by position.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+260,9 Team systems,Defensive matchups by player archetype.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,archetypes clustered from B fields (derived; needs care)
+261,9 Team systems,Opponent bench defense.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+262,9 Team systems,Opponent starting-unit defense.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+263,9 Team systems,Opponent lineup continuity.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+264,9 Team systems,Opponent defensive injuries.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+265,9 Team systems,Team offensive scheme changes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
+266,9 Team systems,Coach-specific game plans.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
+267,9 Team systems,Opponent coaching adjustments.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
+268,9 Team systems,Matchup-specific possession distribution.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",possession distribution by matchup from PBP
+269,9 Team systems,Opponent recent defensive changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
+270,9 Team systems,Expected game script.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",projected possessions/game script from total and spread
+271,10 Injury/roster/lineups,Official injury designation.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
+272,10 Injury/roster/lineups,Injury-report timestamp.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
+273,10 Injury/roster/lineups,Confirmed inactive status.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
+274,10 Injury/roster/lineups,Probable versus questionable status.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
+275,10 Injury/roster/lineups,Recent injury return.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
+276,10 Injury/roster/lineups,Reported minutes restriction.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
+277,10 Injury/roster/lineups,Starting lineup announcement.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
+278,10 Injury/roster/lineups,Starting lineup substitutions.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
+279,10 Injury/roster/lineups,Teammate usage redistribution.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
+280,10 Injury/roster/lineups,Teammate minute redistribution.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
+281,10 Injury/roster/lineups,Teammate assist redistribution.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
+282,10 Injury/roster/lineups,Teammate rebound redistribution.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
+283,10 Injury/roster/lineups,Teammate three-point redistribution.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
+284,10 Injury/roster/lineups,Role changes after trades.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
+285,10 Injury/roster/lineups,New teammate integration.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
+286,10 Injury/roster/lineups,Team chemistry and lineup continuity.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),continuity proxy; chemistry itself unobservable
+287,10 Injury/roster/lineups,Multiple simultaneous absences.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
+288,10 Injury/roster/lineups,Backup player promotion.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
+289,10 Injury/roster/lineups,Rotation uncertainty.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
+290,10 Injury/roster/lineups,Coach comments indicating role changes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",coach comments: no immutable historical record (hindsight)
+291,11 Specialized markets,Steals per defensive possession.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,subject to prop-market inventory (are they priced two-sided?)
+292,11 Specialized markets,Opponent turnover susceptibility.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,subject to prop-market inventory (are they priced two-sided?)
+293,11 Specialized markets,Opponent ball-handler pressure.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",not available per game
+294,11 Specialized markets,Deflections.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, defended_at_rim, touches"
+295,11 Specialized markets,Passing-lane activity.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",not available per game
+296,11 Specialized markets,Blocks per rim contest.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, defended_at_rim, touches"
+297,11 Specialized markets,Opponent rim-attempt volume.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, defended_at_rim, touches"
+298,11 Specialized markets,Opponent shot-block opportunities.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, defended_at_rim, touches"
+299,11 Specialized markets,Personal fouls and minutes risk.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,subject to prop-market inventory (are they priced two-sided?)
+300,11 Specialized markets,Turnovers per touch.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, defended_at_rim, touches"
+301,11 Specialized markets,Turnovers per drive.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",not available per game
+302,11 Specialized markets,Double-double probability.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,subject to prop-market inventory (are they priced two-sided?)
+303,11 Specialized markets,Triple-double probability.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,subject to prop-market inventory (are they priced two-sided?)
+304,11 Specialized markets,Points + rebounds.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,combos; testable only if priced (inventory)
+305,11 Specialized markets,Points + assists.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,combos; testable only if priced (inventory)
+306,11 Specialized markets,Rebounds + assists.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,combos; testable only if priced (inventory)
+307,11 Specialized markets,Points + rebounds + assists.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,combos; testable only if priced (inventory)
+308,11 Specialized markets,First-half props.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",half/quarter production needs period data; pricing unverified
+309,11 Specialized markets,First-quarter props.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",half/quarter production needs period data; pricing unverified
+310,11 Specialized markets,Alternative prop lines.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",alternate/milestone lines: pricing semantics unverified

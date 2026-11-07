@@ -1,0 +1,1482 @@
+From c19a486c5e766be1a5b44d83e9ea305f0f96f1af Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 22:15:54 -0500
+Subject: [PATCH] Round 13: minutes/opportunity model, pre-registered
+ information test, API data inventory, prospective injury snapshots,
+ 310-feature registry and R13-R20 plan
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ PREREG_R13_OPPORTUNITY.md         |  59 ++++++
+ pytest.ini                        |   4 +
+ research/R13_FEATURE_REGISTRY.csv | 311 ++++++++++++++++++++++++++++++
+ research/RESEARCH_PLAN_R13_R20.md | 109 +++++++++++
+ scripts/capture_injuries.py       | 105 ++++++++++
+ scripts/r13_data_inventory.py     | 153 +++++++++++++++
+ scripts/r13_opportunity.py        | 211 ++++++++++++++++++++
+ tests/test_collection_guard.py    |  22 +++
+ tests/test_round13.py             | 189 ++++++++++++++++++
+ v13/minutes_model.py              | 224 +++++++++++++++++++++
+ 10 files changed, 1387 insertions(+)
+ create mode 100644 PREREG_R13_OPPORTUNITY.md
+ create mode 100644 pytest.ini
+ create mode 100644 research/R13_FEATURE_REGISTRY.csv
+ create mode 100644 research/RESEARCH_PLAN_R13_R20.md
+ create mode 100644 scripts/capture_injuries.py
+ create mode 100644 scripts/r13_data_inventory.py
+ create mode 100644 scripts/r13_opportunity.py
+ create mode 100644 tests/test_collection_guard.py
+ create mode 100644 tests/test_round13.py
+ create mode 100644 v13/minutes_model.py
+
+diff --git a/PREREG_R13_OPPORTUNITY.md b/PREREG_R13_OPPORTUNITY.md
+new file mode 100644
+index 0000000..103efd6
+--- /dev/null
++++ b/PREREG_R13_OPPORTUNITY.md
+@@ -0,0 +1,59 @@
++# Pre-registration — R13 minutes / opportunity model
++
++Frozen before any result is seen.
++- Code: `v13/minutes_model.py` (features, model, NB probabilities) and `scripts/r13_opportunity.py` (constants `TRAIN_SEASONS`, `TEST_SEASON`, `REGISTRY`, `PASS_A`; R11's `SPLIT_DATE`, `FDR_Q`).
++- Workflow: `r13-opportunity.yml`.
++
++## Data
++- Regular-season box scores (played rows, min > 0) for 2023-24, 2024-25 and 2025-26, plus the game index. Box scores have no price-provenance problem, so all three seasons are usable for Part A.
++- Part B uses only 2025-26 opening props that pass the provenance gate (`odds-gate-1`). It fails closed on ungated rows.
++
++## Features (all from games on strictly earlier days)
++**Minutes history:**
++- OT-adjusted minutes for the last 3/5/10/20 games, an EWMA (half-life 5) and the 10-game SD;
++- trend (last 3 − last 20).
++
++**Schedule:**
++- days of rest (capped at 5), back-to-back, 3-in-4, 4-in-6;
++- log games played.
++
++**Absence and role:**
++- own team games missed since the last appearance; return flag (≥ 3 missed);
++- **vacated minutes**: summed last-10 average minutes of rotation teammates (≥ 15 min) who did not play in the team's *previous* game. This is the pregame-safe absence proxy; the current game's box score is never used;
++- top-5-minutes role in the previous game;
++- fouls per 36.
++
++## Part A — minutes forecasting (a prediction result, not an edge)
++- **Model:** ridge regression (λ = 10, standardized features), trained on 2023-24 + 2024-25 and scored on every 2025-26 player-game with ≥ 3 prior games.
++- **Distribution:** empirical residual quantiles (10/50/90) from training, by predicted-minutes bucket (< 15, 15–25, 25–32, ≥ 32).
++- **Primary baseline:** EWMA minutes. Last-10 average is reported as well.
++- **PASS A (all required):**
++  - mean (|error model| − |error EWMA|) < 0;
++  - game-cluster bootstrap 95% CI upper bound < 0;
++  - 80% interval coverage between 0.77 and 0.83.
++
++## Part B — information beyond the opening price (2025-26 gated props)
++- **Projection:** stat mean = predicted minutes × EWMA per-minute rate (half-life 10 games; games with ≥ 5 min). Count distribution = negative binomial, with dispersion fitted on 2023-24 + 2024-25.
++- **Features tested** (each against the R11 baseline: logistic of the over outcome on logit of the power-de-vigged opening price):
++
++  | Market | Features |
++  |---|---|
++  | points | `model_edge` (logit P_model − logit P_market), `vacated_min`, `trend` |
++  | rebounds | `model_edge`, `vacated_min` |
++  | assists | `model_edge`, `vacated_min` |
++  | threes | `model_edge` |
++  | pra | `model_edge`, `vacated_min`, `return_flag` |
++
++  That's 12 tests.
++- **Split:** train before 2026-02-01, test on or after.
++- **Uncertainty:** game-cluster bootstrap.
++- **Multiple testing:** BH-FDR q = 0.10 across the 12 tests.
++- **PASS B (per test):** test log-loss Δ < 0, **95% CI upper bound < 0**, BH-significant, and coefficient sign stable across the two training halves. The CI condition is stricter than R11.
++
++## Multiplicity across rounds (stated up front)
++The 2025-26 prices have already been screened in R11 (11 tests) and R12 (2 tests). R13 adds 12 more. So a Part B PASS is a candidate only. Confirmation requires a frozen 2026-27 prospective test on prices captured by the live logger.
++
++## What does not count
++- Descriptive slices (vacated > 0, return, b2b, trend) can't rescue a FAIL.
++- No retuning of λ, half-lives, the rotation threshold, buckets or features after results are seen.
++- A Part A PASS alone is not evidence of profit: the books model minutes too.
+diff --git a/pytest.ini b/pytest.ini
+new file mode 100644
+index 0000000..2003b25
+--- /dev/null
++++ b/pytest.ini
+@@ -0,0 +1,4 @@
++[pytest]
++# Only tests/ holds tests. Without this, pytest also collects scripts/*_test.py (e.g.
++# scripts/feature_info_test.py) and treats helper functions as tests.
++testpaths = tests
+diff --git a/research/R13_FEATURE_REGISTRY.csv b/research/R13_FEATURE_REGISTRY.csv
+new file mode 100644
+index 0000000..a089252
+--- /dev/null
++++ b/research/R13_FEATURE_REGISTRY.csv
+@@ -0,0 +1,311 @@
++id,family,feature,feasibility,feasibility_meaning,note
++1,1 Minutes & opportunity,"Last 3, 5, 10, 20-game minutes, exponentially weighted.",A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++2,1 Minutes & opportunity,Minutes adjusted for overtime.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++3,1 Minutes & opportunity,Minutes excluding games with injury-related restrictions.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",restrictions are news; no timestamped history
++4,1 Minutes & opportunity,Starting versus bench role.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),starter flag absent in /v1/stats; proxy = top-5 minutes last game; exact starters via /nba/v1/lineups 2025+ for prior games
++5,1 Minutes & opportunity,Minutes after a recent starting-lineup promotion.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),starter flag absent in /v1/stats; proxy = top-5 minutes last game; exact starters via /nba/v1/lineups 2025+ for prior games
++6,1 Minutes & opportunity,Minutes following a teammate's injury.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,absence known only via 'did not play in team's previous game' (pregame-safe proxy)
++7,1 Minutes & opportunity,Minutes following a teammate's return.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,absence known only via 'did not play in team's previous game' (pregame-safe proxy)
++8,1 Minutes & opportunity,Minutes when a specific teammate is absent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,absence known only via 'did not play in team's previous game' (pregame-safe proxy)
++9,1 Minutes & opportunity,Minutes when multiple rotation players are absent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++10,1 Minutes & opportunity,Coach-specific rotation patterns.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),no coach field; team-season proxy only (coach changes not identified)
++11,1 Minutes & opportunity,Coach-specific substitution timing.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",needs substitution events
++12,1 Minutes & opportunity,First-half versus second-half playing time.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",needs substitution events
++13,1 Minutes & opportunity,Close-game versus blowout minutes.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",pregame spread required; historical blowout margin is post-game (leakage)
++14,1 Minutes & opportunity,Foul-trouble susceptibility.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++15,1 Minutes & opportunity,Minutes restrictions after injury.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",restrictions are news; no timestamped history
++16,1 Minutes & opportunity,Minutes after extended absence.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++17,1 Minutes & opportunity,Rookie minutes progression.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),years since draft; no birth date in BDL
++18,1 Minutes & opportunity,Veteran workload management.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),years since draft; no birth date in BDL
++19,1 Minutes & opportunity,Back-to-back minute reductions.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++20,1 Minutes & opportunity,Three-games-in-four-nights workload.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++21,1 Minutes & opportunity,Four-games-in-six-nights workload.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++22,1 Minutes & opportunity,Home/away rotation differences.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++23,1 Minutes & opportunity,Minutes against small-ball versus traditional lineups.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),opponent minutes-weighted size from prior games; true small-ball lineups need PBP (C)
++24,1 Minutes & opportunity,Minutes in particular defensive assignments.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"matchup_* fields are per-player aggregates, no defender identity"
++25,1 Minutes & opportunity,Projected competitive-game probability.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",pregame spread required; historical blowout margin is post-game (leakage)
++26,1 Minutes & opportunity,Rotation tightening near playoffs.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++27,1 Minutes & opportunity,Tanking/developmental rotation changes.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),standings from game results; 'tanking' intent unobservable
++28,1 Minutes & opportunity,Trade-deadline rotation disruptions.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++29,1 Minutes & opportunity,Starting lineup continuity.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),top-5 overlap across games; exact via lineups 2025+
++30,1 Minutes & opportunity,Position-specific depth-chart competition.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),listed position + minutes depth
++31,2 Physical & matchups,Player height.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++32,2 Physical & matchups,Player weight.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++33,2 Physical & matchups,"Wingspan, where reliable.",X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no reliable wingspan/reach source for all players
++34,2 Physical & matchups,"Standing reach, where available.",X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no reliable wingspan/reach source for all players
++35,2 Physical & matchups,Age.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),years since draft (no birth date)
++36,2 Physical & matchups,NBA experience.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++37,2 Physical & matchups,Positional size advantage.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,prior-game minutes-weighted opponent size by position
++38,2 Physical & matchups,Weight advantage against primary defender.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
++39,2 Physical & matchups,Height advantage against primary defender.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
++40,2 Physical & matchups,Wingspan mismatch.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
++41,2 Physical & matchups,Opponent center size.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++42,2 Physical & matchups,Opponent frontcourt average height.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++43,2 Physical & matchups,Opponent frontcourt average weight.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++44,2 Physical & matchups,Opponent lineup average size.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,prior-game minutes-weighted opponent size by position
++45,2 Physical & matchups,Opponent lineup rebounding strength.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++46,2 Physical & matchups,Speed and mobility mismatch proxies.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,speed/distance (weak proxy for mobility)
++47,2 Physical & matchups,Guard versus big switches.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,switches_on (per-player count)
++48,2 Physical & matchups,Post-up mismatch frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",post-up frequency only as season aggregates (not point-in-time)
++49,2 Physical & matchups,Defensive switch frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,switches_on (per-player count)
++50,2 Physical & matchups,Expected primary defender.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
++51,2 Physical & matchups,Historical production against that defender.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
++52,2 Physical & matchups,Defensive matchup duration.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
++53,2 Physical & matchups,Likelihood of cross-matching.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",primary defender not known pregame; API matchup fields lack defender identity
++54,2 Physical & matchups,Opponent rim protection.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"defended_at_rim_*, contested_*, pct_pts_paint"
++55,2 Physical & matchups,Opponent perimeter containment.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"defended_at_rim_*, contested_*, pct_pts_paint"
++56,2 Physical & matchups,Defensive foul tendency.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++57,2 Physical & matchups,Physicality and free-throw generation.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++58,2 Physical & matchups,Size combined with opponent missed shots.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++59,2 Physical & matchups,Size combined with minutes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++60,2 Physical & matchups,Size combined with opponent shot location.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"defended_at_rim_*, contested_*, pct_pts_paint"
++61,3 Rebounding,Opponent field-goal attempts.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++62,3 Rebounding,Opponent field-goal percentage.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++63,3 Rebounding,Opponent expected missed shots.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++64,3 Rebounding,Opponent three-point attempt rate.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++65,3 Rebounding,Long-rebound opportunity rate.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),opponent 3PA rate as long-rebound proxy
++66,3 Rebounding,Opponent rim-attempt frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
++67,3 Rebounding,Opponent midrange frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
++68,3 Rebounding,Team defensive rebound opportunities.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++69,3 Rebounding,Team offensive rebound opportunities.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++70,3 Rebounding,Individual rebound chances per minute.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
++71,3 Rebounding,Contested rebound chances.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",contested/uncontested rebound split not in API field list
++72,3 Rebounding,Uncontested rebound chances.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",contested/uncontested rebound split not in API field list
++73,3 Rebounding,Rebound conversion rate.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
++74,3 Rebounding,Box-out frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
++75,3 Rebounding,Teammate rebound competition.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++76,3 Rebounding,Rebounds when starting center is absent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,positional teammate absent in previous game
++77,3 Rebounding,Rebounds when power forward is absent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,positional teammate absent in previous game
++78,3 Rebounding,Opponent offensive rebounding strength.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++79,3 Rebounding,Opponent second-chance opportunities.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
++80,3 Rebounding,Small-ball lineup effects.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",lineups/shot distance from PBP
++81,3 Rebounding,Zone defense effects.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no zone/scheme labels
++82,3 Rebounding,Defensive scheme effects on rebound positioning.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no zone/scheme labels
++83,3 Rebounding,Rebound opportunity by shot distance.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",lineups/shot distance from PBP
++84,3 Rebounding,Rebound share by lineup combination.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",lineups/shot distance from PBP
++85,3 Rebounding,Player-specific offensive versus defensive rebound split.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++86,3 Rebounding,Rebound chances versus actual rebounds.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"rebound_chances_*, box_outs, pct shot mix, second-chance points"
++87,3 Rebounding,Missed-shot volume conditional on pace.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++88,3 Rebounding,Rebound location tendencies.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",lineups/shot distance from PBP
++89,3 Rebounding,Opponent lineup spacing.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++90,3 Rebounding,Rebounding rate in close games.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",close-game expectation needs spread
++91,4 Threes,Three-point attempts per minute.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++92,4 Threes,Catch-and-shoot attempt rate.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
++93,4 Threes,Pull-up three-point attempt rate.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
++94,4 Threes,Corner three frequency.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering","shot coordinates from PBP, if present"
++95,4 Threes,Above-the-break frequency.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering","shot coordinates from PBP, if present"
++96,4 Threes,Wide-open attempts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"contested/uncontested FGA (all shots, not 3PT-specific)"
++97,4 Threes,Open attempts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"contested/uncontested FGA (all shots, not 3PT-specific)"
++98,4 Threes,Closely contested attempts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"contested/uncontested FGA (all shots, not 3PT-specific)"
++99,4 Threes,Defender proximity.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
++100,4 Threes,Opponent three-point attempts allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++101,4 Threes,Opponent corner threes allowed.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering","shot coordinates from PBP, if present"
++102,4 Threes,Opponent catch-and-shoot threes allowed.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
++103,4 Threes,Opponent pull-up threes allowed.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
++104,4 Threes,Opponent defensive scheme.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
++105,4 Threes,Opponent drop coverage.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
++106,4 Threes,Opponent switching frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,switches_on
++107,4 Threes,Opponent help-defense frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
++108,4 Threes,Opponent paint-collapse frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
++109,4 Threes,Opponent closeout effectiveness.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
++110,4 Threes,Teammate drive-and-kick creation.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"pct_assisted_3pt, passes"
++111,4 Threes,Potential three-point assists received.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",catch-and-shoot/pull-up/defender distance/scheme not available per game
++112,4 Threes,Three-point volume when primary creator is absent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++113,4 Threes,Three-point volume with specific playmakers.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++114,4 Threes,Recent three-point attempt changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++115,4 Threes,Recent shooting accuracy relative to expected quality.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"contested/uncontested FGA (all shots, not 3PT-specific)"
++116,4 Threes,Opponent personnel available on perimeter.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++117,4 Threes,Home/away shooting splits.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++118,4 Threes,"Arena-specific shooting effects, if statistically defensible.",A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),"arena = home team; samples small, likely noise"
++119,4 Threes,Rest and fatigue effects on shooting.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++120,4 Threes,Shooting variance and regression to baseline.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++121,5 Assists,Potential assists per minute.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
++122,5 Assists,Actual assists per potential assist.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
++123,5 Assists,Teammate shooting quality.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++124,5 Assists,Teammate shooting availability.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++125,5 Assists,Expected teammate field-goal percentage.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++126,5 Assists,Player touches.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
++127,5 Assists,Time of possession.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
++128,5 Assists,Passes made.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
++129,5 Assists,Drives.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
++130,5 Assists,Drive-and-kick passes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
++131,5 Assists,Pick-and-roll ball-handler possessions.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
++132,5 Assists,Pick-and-roll efficiency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
++133,5 Assists,Assist chances with particular teammates.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",assist participants / shot locations / lineups from PBP
++134,5 Assists,Assist chances without primary point guard.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++135,5 Assists,Secondary playmaker role changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++136,5 Assists,Team pace.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),pace estimated from box score possessions; B has pace
++137,5 Assists,Opponent defensive assists allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++138,5 Assists,Opponent defensive scheme.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
++139,5 Assists,Opponent double-team frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
++140,5 Assists,Opponent trap frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
++141,5 Assists,Opponent help rotations.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists/time of possession/drives/play types/scheme not available per game
++142,5 Assists,Opponent switch frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
++143,5 Assists,Transition possessions.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
++144,5 Assists,Half-court creation rate.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
++145,5 Assists,Usage versus passing tradeoff.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),usage estimated from box score; B has usage_percentage
++146,5 Assists,Potential assist conversion under fatigue.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++147,5 Assists,Teammate shot-location distribution.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",assist participants / shot locations / lineups from PBP
++148,5 Assists,Opponent rim protection causing kickouts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"touches, passes, switches_on, fast-break points"
++149,5 Assists,Player turnover pressure.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++150,5 Assists,Assists by lineup combination.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",assist participants / shot locations / lineups from PBP
++151,6 Points,Field-goal attempts per minute.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++152,6 Points,Usage rate.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++153,6 Points,Usage changes with absent teammates.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++154,6 Points,Touches and time of possession.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++155,6 Points,Drives per minute.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++156,6 Points,Paint touches.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++157,6 Points,Post touches.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++158,6 Points,Catch-and-shoot opportunities.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++159,6 Points,Pull-up attempts.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++160,6 Points,Shot-location mix.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++161,6 Points,Rim attempts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++162,6 Points,Midrange attempts.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++163,6 Points,Three-point attempts.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++164,6 Points,Free-throw attempts.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++165,6 Points,Free-throw rate.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++166,6 Points,Opponent foul tendency.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++167,6 Points,Primary defender foul tendency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++168,6 Points,Opponent rim protection.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++169,6 Points,Opponent paint defense.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++170,6 Points,Opponent midrange defense.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++171,6 Points,Opponent perimeter defense.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++172,6 Points,Defensive scheme versus player shot profile.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++173,6 Points,Transition opportunities.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++174,6 Points,Fast-break scoring.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++175,6 Points,Second-chance scoring.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++176,6 Points,Isolation possessions.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++177,6 Points,Pick-and-roll scoring.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++178,6 Points,Post-up scoring.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++179,6 Points,Recent shot-quality change.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++180,6 Points,Expected field-goal percentage.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++181,6 Points,True shooting regression.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++182,6 Points,Teammate spacing effects.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),teammate 3PA rate; star absent in previous game
++183,6 Points,Defensive attention with star teammate absent.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),teammate 3PA rate; star absent in previous game
++184,6 Points,Defensive attention with star teammate present.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++185,6 Points,Home/away effects after controlling for opponent.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++186,6 Points,Rest effects on usage and efficiency.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++187,6 Points,Player-specific foul-drawing skill.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++188,6 Points,Opponent lineup defensive weaknesses.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++189,6 Points,Scoring versus specific defensive archetypes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",drives/post/paint touches/play types/xFG%/defender fouls not available per game
++190,6 Points,Player-specific shot creation under pressure.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, touches, shot mix, opponent paint/rim/second-chance metrics"
++191,7 Fatigue/rest/travel,Back-to-back games.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++192,7 Fatigue/rest/travel,Second night of back-to-back.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++193,7 Fatigue/rest/travel,Three games in four nights.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++194,7 Fatigue/rest/travel,Four games in six nights.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++195,7 Fatigue/rest/travel,Five games in eight nights.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++196,7 Fatigue/rest/travel,Total minutes in preceding seven days.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++197,7 Fatigue/rest/travel,Total minutes in preceding 14 days.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++198,7 Fatigue/rest/travel,Travel distance.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++199,7 Fatigue/rest/travel,Time-zone changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++200,7 Fatigue/rest/travel,East-to-west travel.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++201,7 Fatigue/rest/travel,West-to-east travel.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++202,7 Fatigue/rest/travel,Early local tipoffs.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++203,7 Fatigue/rest/travel,Days since last game.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++204,7 Fatigue/rest/travel,Days since last road game.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++205,7 Fatigue/rest/travel,Road-trip length.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++206,7 Fatigue/rest/travel,First game home after long trip.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++207,7 Fatigue/rest/travel,Altitude.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++208,7 Fatigue/rest/travel,Recent overtime workload.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++209,7 Fatigue/rest/travel,Recent high-usage workload.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++210,7 Fatigue/rest/travel,Age × fatigue interaction.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++211,7 Fatigue/rest/travel,Minutes × fatigue interaction.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++212,7 Fatigue/rest/travel,Fatigue × three-point accuracy.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++213,7 Fatigue/rest/travel,Fatigue × defensive activity.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, box outs"
++214,7 Fatigue/rest/travel,Fatigue × turnover rate.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,travel from team locations (v13/schedule_travel.py); age via years since draft
++215,7 Fatigue/rest/travel,Fatigue × rebounding effort.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, box outs"
++216,8 Form & momentum,Last 3-game production.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++217,8 Form & momentum,Last 5-game production.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++218,8 Form & momentum,Last 10-game production.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++219,8 Form & momentum,Exponentially weighted production.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++220,8 Form & momentum,Recent minutes changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++221,8 Form & momentum,Recent usage changes.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, rebound chances, contested-shot share"
++222,8 Form & momentum,Recent shot-attempt changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++223,8 Form & momentum,Recent potential-assist changes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists / coaching intent / play types not available
++224,8 Form & momentum,Recent rebound-chance changes.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, rebound chances, contested-shot share"
++225,8 Form & momentum,Recent three-point volume changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++226,8 Form & momentum,Recent shot-quality changes.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, rebound chances, contested-shot share"
++227,8 Form & momentum,Recent opponent-adjusted production.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++228,8 Form & momentum,Recent performance against strong defenses.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++229,8 Form & momentum,Recent performance against weak defenses.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++230,8 Form & momentum,Shooting percentage versus expected shooting.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, rebound chances, contested-shot share"
++231,8 Form & momentum,Free-throw attempt changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++232,8 Form & momentum,Role-change detection.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++233,8 Form & momentum,Structural break detection.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++234,8 Form & momentum,Persistent versus temporary form.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++235,8 Form & momentum,Regression-to-mean probabilities.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++236,8 Form & momentum,Recent coaching adjustments.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists / coaching intent / play types not available
++237,8 Form & momentum,Recent starting lineup changes.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),lineup change via top-5 minutes proxy; exact via lineups 2025+
++238,8 Form & momentum,Changes in offensive responsibilities.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"usage, rebound chances, contested-shot share"
++239,8 Form & momentum,Recent play-type changes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",potential assists / coaching intent / play types not available
++240,8 Form & momentum,Whether recent trends are already incorporated into sportsbook lines.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",this is the market-information test itself
++241,9 Team systems,Team pace.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),possessions estimated; B pace
++242,9 Team systems,Opponent pace.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++243,9 Team systems,Projected possessions.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",projected possessions/game script from total and spread
++244,9 Team systems,Half-court versus transition rate.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"fast-break points, shot mix allowed, rim defense, switches"
++245,9 Team systems,Offensive efficiency.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++246,9 Team systems,Defensive efficiency.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++247,9 Team systems,Opponent shot profile allowed.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"fast-break points, shot mix allowed, rim defense, switches"
++248,9 Team systems,Opponent rim protection.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"fast-break points, shot mix allowed, rim defense, switches"
++249,9 Team systems,Opponent perimeter defense.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"fast-break points, shot mix allowed, rim defense, switches"
++250,9 Team systems,Opponent rebounding opportunities allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++251,9 Team systems,Opponent assists allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++252,9 Team systems,Opponent three-point volume allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++253,9 Team systems,Opponent free throws allowed.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++254,9 Team systems,Defensive scheme.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
++255,9 Team systems,Switching frequency.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"fast-break points, shot mix allowed, rim defense, switches"
++256,9 Team systems,Zone frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
++257,9 Team systems,Drop coverage.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
++258,9 Team systems,Blitz and trap frequency.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
++259,9 Team systems,Defensive matchups by position.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++260,9 Team systems,Defensive matchups by player archetype.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,archetypes clustered from B fields (derived; needs care)
++261,9 Team systems,Opponent bench defense.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++262,9 Team systems,Opponent starting-unit defense.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++263,9 Team systems,Opponent lineup continuity.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++264,9 Team systems,Opponent defensive injuries.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++265,9 Team systems,Team offensive scheme changes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
++266,9 Team systems,Coach-specific game plans.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
++267,9 Team systems,Opponent coaching adjustments.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",no scheme or game-plan labels
++268,9 Team systems,Matchup-specific possession distribution.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",possession distribution by matchup from PBP
++269,9 Team systems,Opponent recent defensive changes.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,
++270,9 Team systems,Expected game script.,E,"Needs gated game odds (spread/total) - 2025-26 only, then prospective",projected possessions/game script from total and spread
++271,10 Injury/roster/lineups,Official injury designation.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
++272,10 Injury/roster/lineups,Injury-report timestamp.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
++273,10 Injury/roster/lineups,Confirmed inactive status.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
++274,10 Injury/roster/lineups,Probable versus questionable status.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
++275,10 Injury/roster/lineups,Recent injury return.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
++276,10 Injury/roster/lineups,Reported minutes restriction.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
++277,10 Injury/roster/lineups,Starting lineup announcement.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
++278,10 Injury/roster/lineups,Starting lineup substitutions.,D,"Prospective only: must be captured with our own timestamps from 2026-27 (injury snapshots, odds logger)",historical PDFs unavailable (R12 probe); capture snapshots from 2026-27 (scripts/capture_injuries.py)
++279,10 Injury/roster/lineups,Teammate usage redistribution.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
++280,10 Injury/roster/lineups,Teammate minute redistribution.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
++281,10 Injury/roster/lineups,Teammate assist redistribution.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
++282,10 Injury/roster/lineups,Teammate rebound redistribution.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
++283,10 Injury/roster/lineups,Teammate three-point redistribution.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
++284,10 Injury/roster/lineups,Role changes after trades.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
++285,10 Injury/roster/lineups,New teammate integration.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
++286,10 Injury/roster/lineups,Team chemistry and lineup continuity.,A~,Box-score PROXY only (the exact quantity is unavailable; proxy stated in note),continuity proxy; chemistry itself unobservable
++287,10 Injury/roster/lineups,Multiple simultaneous absences.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
++288,10 Injury/roster/lineups,Backup player promotion.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
++289,10 Injury/roster/lineups,Rotation uncertainty.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,pregame-safe via previous-game absence and team changes
++290,10 Injury/roster/lineups,Coach comments indicating role changes.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",coach comments: no immutable historical record (hindsight)
++291,11 Specialized markets,Steals per defensive possession.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,subject to prop-market inventory (are they priced two-sided?)
++292,11 Specialized markets,Opponent turnover susceptibility.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,subject to prop-market inventory (are they priced two-sided?)
++293,11 Specialized markets,Opponent ball-handler pressure.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",not available per game
++294,11 Specialized markets,Deflections.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, defended_at_rim, touches"
++295,11 Specialized markets,Passing-lane activity.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",not available per game
++296,11 Specialized markets,Blocks per rim contest.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, defended_at_rim, touches"
++297,11 Specialized markets,Opponent rim-attempt volume.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, defended_at_rim, touches"
++298,11 Specialized markets,Opponent shot-block opportunities.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, defended_at_rim, touches"
++299,11 Specialized markets,Personal fouls and minutes risk.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,subject to prop-market inventory (are they priced two-sided?)
++300,11 Specialized markets,Turnovers per touch.,B,BALLDONTLIE /nba/v2/stats/advanced per-game tracking/hustle field; historical coverage UNVERIFIED until the R13 inventory,"deflections, defended_at_rim, touches"
++301,11 Specialized markets,Turnovers per drive.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",not available per game
++302,11 Specialized markets,Double-double probability.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,subject to prop-market inventory (are they priced two-sided?)
++303,11 Specialized markets,Triple-double probability.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,subject to prop-market inventory (are they priced two-sided?)
++304,11 Specialized markets,Points + rebounds.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,combos; testable only if priced (inventory)
++305,11 Specialized markets,Points + assists.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,combos; testable only if priced (inventory)
++306,11 Specialized markets,Rebounds + assists.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,combos; testable only if priced (inventory)
++307,11 Specialized markets,Points + rebounds + assists.,A,Box scores + game index we already hold (2023-24..2025-26); pregame-safe by construction,combos; testable only if priced (inventory)
++308,11 Specialized markets,First-half props.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",half/quarter production needs period data; pricing unverified
++309,11 Specialized markets,First-quarter props.,C,"Play-by-play (/nba/v1/plays: substitutions, shot coordinates, foul timing); availability UNVERIFIED; heavy engineering",half/quarter production needs period data; pricing unverified
++310,11 Specialized markets,Alternative prop lines.,X,"Not responsibly testable with available data (no source, or no pregame-safe source)",alternate/milestone lines: pricing semantics unverified
+diff --git a/research/RESEARCH_PLAN_R13_R20.md b/research/RESEARCH_PLAN_R13_R20.md
+new file mode 100644
+index 0000000..d2a66b6
+--- /dev/null
++++ b/research/RESEARCH_PLAN_R13_R20.md
+@@ -0,0 +1,109 @@
++# NBA V13 player props — research plan, Rounds 13–20
++
++Written in response to the "Player Prop Predictive Research Master Plan". Nothing here is a measured result. Every number marked *prior* is a judgement, not data.
++
++## 0. Starting point (measured)
++- **R10:** blowout unders −2.12% (4,764 bets); consistency −2.97%. **R11:** 0 of 11 matchup features passed.
++- **R12:** price outliers −6.23% (1,450 bets); line outliers −3.41% (14,983 bets). **The official injury-PDF probe retrieved no usable reports.**
++- **Implication:** at open, the books are hard to beat with public box-score features, and betting against the odd book out lost money. The remaining structural opening is *information timing*. That needs prospective capture, which can only start now.
++
++## 1. Feature registry (`research/R13_FEATURE_REGISTRY.csv`, all 310 items)
++
++| Class | Meaning | Count |
++|---|---|---|
++| A | Box scores + game index we already hold, pregame-safe | 139 |
++| A~ | Box-score proxy only (the proxy is stated) | 19 |
++| B | `/nba/v2/stats/advanced` per-game tracking/hustle field. **Historical coverage unverified until the R13 inventory** | 59 |
++| C | Play-by-play (`/nba/v1/plays`). Availability unverified; heavy engineering | 15 |
++| D | Prospective capture only (injury status, restrictions, lineups announced) | 9 |
++| E | Needs gated game odds (2025-26, then prospective) | 6 |
++| X | Not responsibly testable | 63 |
++
++**What the API actually offers.** `/nba/v2/stats/advanced` (per player-game, with a `period` field) lists:
++- rebound chances (off/def/total), box outs, touches, passes, secondary and free-throw assists;
++- contested/uncontested FGA, defended-at-rim, deflections, switches_on, speed/distance;
++- matchup_* aggregates, usage, pace, shot-mix percentages.
++
++It does **not** list potential assists, drives, time of possession, catch-and-shoot or pull-up splits, play types, defender distance, or defender identity. Season-level tracking aggregates (`/team_season_averages`) are not point-in-time, so using them historically would leak.
++
++## 2. Thirty hypotheses, ranked
++Ranking = mechanism strength × data class × chance the price misses it × cost. The prior is our honest guess that it adds information beyond the opening price.
++
++| # | Hypothesis (mechanism) | Class | Market | Round | Prior |
++|---|---|---|---|---|---|
++| 1 | Vacated minutes (rotation teammate missed previous game) redistribute minutes/usage | A | PRA, pts, reb, ast | 13 | low–med |
++| 2 | Minutes distribution model beats EWMA on unseen games (prediction, not edge) | A | — | 13 | high (prediction) |
++| 3 | Minutes × per-minute rate NB probability adds information beyond price | A | all | 13 | low |
++| 4 | Return from ≥ 3 missed games suppresses minutes (restriction) | A | PRA | 13 | low–med |
++| 5 | Rebound chances per minute × opponent missed shots → rebound opportunity model | B | reb | 14 | low–med |
++| 6 | Starting C/PF absent previous game → rebound redistribution to remaining bigs | A | reb | 14 | low–med |
++| 7 | Rebound conversion (reb / chances) regresses; chances are the stable skill | B | reb | 14 | low |
++| 8 | Opponent OREB strength cuts defensive rebound chances | A | reb | 14 | low |
++| 9 | Teammate box-out volume suppresses a big's rebounds | B | reb | 14 | low |
++| 10 | 3PA per minute (EWMA) is stable, 3P% is noise: lines overreact to recent makes | A | threes | 15 | low–med |
++| 11 | Uncontested-FGA share shift → three-point volume change | B | threes | 15 | low |
++| 12 | Primary creator absent previous game → fewer assisted threes for spot-up shooters | A/B | threes | 15 | low |
++| 13 | Touches/passes per minute are stable assist opportunity; assists/pass regresses | B | ast | 16 | low–med |
++| 14 | Teammate shooting availability (best shooters absent) lowers assists | A | ast | 16 | low |
++| 15 | Secondary playmaker promoted when the primary is absent | A | ast | 16 | low–med |
++| 16 | Usage redistribution with an absent star (usage_percentage history) | A/B | pts, PRA | 17 | low |
++| 17 | FTA rate × opponent foul rate | A | pts | 17 | low |
++| 18 | Shot-mix (paint share) × opponent rim defense (defended_at_rim) | B | pts | 17 | low |
++| 19 | Schedule density × years since draft × recent minutes load | A | PRA | 18 | low |
++| 20 | Structural break (role change) detected earlier than the line adjusts | A | PRA | 18 | low–med |
++| 21 | Hot hand: recent production beyond opportunity/shot quality (expect null) | A/B | all | 18 | very low |
++| 22 | Foul susceptibility × opponent FTA rate → minutes risk | A | PRA | 18 | low |
++| 23 | Opponent pace (estimated possessions) × player rates | A/B | PRA | 19 | low |
++| 24 | Opponent 3PA rate → long rebounds for guards/wings | A | reb | 14 | low |
++| 25 | New-team integration after a trade (minutes ramp) | A | PRA | 18 | low |
++| 26 | Rookie minutes progression through the season | A | PRA | 18 | low |
++| 27 | Lineup continuity (top-5 overlap) and efficiency | A~ | pts | 19 | very low |
++| 28 | Spread-implied competitiveness × player minutes distribution (H1 failed at the bet level) | E | PRA | 19 | very low |
++| 29 | Combo vs component pricing coherence (consistency failed in R10) | A | combos | 19 | very low |
++| 30 | Steals/blocks: deflections and defended_at_rim opportunity, only if priced two-sided | B | stl/blk | 19 | unknown (inventory) |
++
++## 3. Data acquisition plan
++1. **R13 inventory (this round, about 30 requests):**
++   - `/nba/v2/stats/advanced` for 2023-24, 2024-25 and 2025-26 (3 dates each): per-field non-null share, especially rebound_chances, touches, passes, contested_fga, box_outs;
++   - `/nba/v1/advanced` for comparison;
++   - `/nba/v1/plays` (both parameter styles), `/nba/v1/lineups`, and the `/nba/v1/player_injuries` snapshot schema;
++   - prop types and two-sided coverage in the saved 2025-26 opening props.
++2. **If B fields cover all three seasons at ≥ 80%:** collect full per-game advanced v2, keeping period 0 rows only, then build R14–R17 B features with the same strictly-earlier-day rule. If they cover only 2025-26, B features are prospective/one-season only, and the plan says so.
++3. **Plays (C):** collect only if R14+ needs it *and* the inventory shows substitutions/coordinates for past seasons. 2025-26 first.
++4. **Lineups:** 2025-26 onward, prior games only (the endpoint returns data once a game begins, so the current game's lineup is never a pregame input).
++5. **Prospective capture from opening night 2026-27 (the most valuable step; it cannot be done later):**
++   - odds logger v2, which needs `main`;
++   - **injury-status snapshots** every 15–30 min, stamped with our clock (`scripts/capture_injuries.py`, workflow `r13-injury-snapshots.yml`). `status_changes()` derives first-seen times. These are the only injury timestamps a backtest may use.
++6. **Not acquired:** scheme/coverage labels, wingspan/reach, birth dates, defender-pair matchups, stats.nba.com tracking scrape (cloud-IP blocking and terms are unverified, so not planned without a deliberate decision).
++
++## 4. Round 13
++See `PREREG_R13_OPPORTUNITY.md`, `v13/minutes_model.py`, `scripts/r13_opportunity.py`, `scripts/r13_data_inventory.py`, `scripts/capture_injuries.py` and tests `tests/test_round13.py`.
++
++## 5. Roadmap with gates
++| Round | Work | Gate to continue |
++|---|---|---|
++| 13 | Inventory; minutes distribution; opportunity information test; start injury snapshots | Part A PASS → minutes model becomes the baseline. Part B result is screening only |
++| 14 | Rebounds: opportunity (missed shots × chances) then share; positional absence | Information PASS vs **market + minutes baseline** |
++| 15 | Threes: attempts first, makes regress to long-run %; creator absence | Same |
++| 16 | Assists: touches/passes opportunity, teammate shooting availability | Same |
++| 17 | Points: usage, FTA, shot mix vs rim defense | Same |
++| 18 | Fatigue, form, structural breaks, trades/rookies | Same; hot-hand expected null |
++| 19 | Combine only survivors; calibrated ensemble; cross-market correlations (pts/threes/PRA are not independent) | Calibration (reliability curves), log loss vs market on 2026-27 data |
++| 20 | Prospective shadow qualification on synchronized logger prices at the user's daily scan time; CLV; frozen staking | ≥ 300 shadow bets, positive CLV, cluster CI > 0 before any real stake |
++
++**Test-budget rule.** 2025-26 is our only validated price season. R11–R13 have screened it 25 times. From R14 on, the 2025-26 window is used for *screening* only. Every "PASS" is confirmed only on 2026-27 data captured prospectively, with the feature frozen first. Prediction-only tests (box scores, no prices) can use all seasons freely.
++
++## 6. Signals we cannot test responsibly with current data
++- **Coverage scheme:** drop, switch rate (beyond the switches_on count), zone, blitz, trap, double-team, help, closeouts.
++- **Physical / matchup:** wingspan, standing reach, true age; expected primary defender and defender-pair history; post-up/isolation/pick-and-roll play types per game.
++- **Tracking we don't have:** potential assists, time of possession, drives, catch-and-shoot vs pull-up per game, defender distance per shot, xFG%.
++- **News and intent:** coach comments and intent, chemistry, minutes restrictions historically, official injury designations and timestamps historically (the probe failed), starting-lineup announcements historically.
++- **Too little data or unverified pricing:** arena effects (samples too small), alternate/milestone lines and first-quarter props (pricing semantics unverified).
++
++## 7. Market priority
++1. **Rebounds:** opportunity-driven, the richest tracking support (chances, box outs), less public attention.
++2. **Assists:** teammate-dependent; touches/passes give an opportunity measure.
++3. **PRA / combos:** where a minutes model has the most leverage (all three stats scale with minutes).
++4. **Threes:** attempts are predictable, makes are noisy. Heavy binomial variance limits any edge.
++5. **Points:** the most efficient and most heavily bet market. Lowest prior.
++6. **Steals/blocks/doubles:** only if the inventory shows two-sided prices with enough volume. High variance and typically heavy juice.
+diff --git a/scripts/capture_injuries.py b/scripts/capture_injuries.py
+new file mode 100644
+index 0000000..6c19739
+--- /dev/null
++++ b/scripts/capture_injuries.py
+@@ -0,0 +1,105 @@
++"""Prospective injury-status capture (2026-27 onward): the news-timing dataset we cannot rebuild later.
++
++Historical official injury PDFs could not be retrieved (R12 probe), and BALLDONTLIE's
++/nba/v1/player_injuries is a CURRENT snapshot with no publication timestamp. The only honest way to
++know WHEN a status was knowable is to capture it ourselves on a schedule and stamp it with our clock.
++
++Each run writes (unique, timestamped names; never overwritten):
++  snapshot.jsonl   one row per listed player: captured_at_utc, player_id, team_id, status,
++                   return_date, description, row_sha256
++  manifest.json    captured_at_utc, rows, pages, response hashes, set_sha256 (hash of the sorted
++                   normalized rows, so unchanged snapshots are recognisable)
++status_changes() turns a sequence of snapshots into events with first_seen_utc: the earliest time
++WE could have known the new status. Those are the only injury timestamps a backtest may use.
++"""
++import argparse, hashlib, json, os, sys, time
++from datetime import datetime, timezone
++from pathlib import Path
++
++URL = "https://api.balldontlie.io/nba/v1/player_injuries"
++
++
++def sha(text):
++    return hashlib.sha256(text.encode()).hexdigest()
++
++
++def normalize(row, captured):
++    pl = row.get("player") or {}
++    team = pl.get("team_id") or (row.get("team") or {}).get("id")
++    out = {"captured_at_utc": captured, "player_id": pl.get("id"),
++           "player_name": " ".join(x for x in (pl.get("first_name"), pl.get("last_name")) if x),
++           "team_id": team, "status": row.get("status"), "return_date": row.get("return_date"),
++           "description": row.get("description")}
++    out["row_sha256"] = sha(json.dumps({k: v for k, v in out.items() if k != "captured_at_utc"}, sort_keys=True))
++    return out
++
++
++def status_changes(snapshots):
++    """snapshots: list of (captured_at_utc, [normalized rows]) in any order.
++    Returns events {player_id, old_status, new_status, first_seen_utc, previous_seen_utc} whenever a
++    player's status differs from his status in the previous snapshot (absent = 'not_listed')."""
++    events, last = [], {}
++    prev_time = None
++    for captured, rows in sorted(snapshots, key=lambda s: s[0]):
++        now = {r["player_id"]: r.get("status") or "unknown" for r in rows if r.get("player_id") is not None}
++        if prev_time is not None:
++            for pid in set(now) | set(last):
++                old, new = last.get(pid, "not_listed"), now.get(pid, "not_listed")
++                if old != new:
++                    events.append({"player_id": pid, "old_status": old, "new_status": new,
++                                   "first_seen_utc": captured, "previous_seen_utc": prev_time})
++        last, prev_time = now, captured
++    return events
++
++
++def main():
++    import requests
++    p = argparse.ArgumentParser()
++    p.add_argument("--out-dir", required=True)
++    p.add_argument("--max-pages", type=int, default=30)
++    a = p.parse_args()
++    key = os.environ.get("BALLDONTLIE_API_KEY")
++    if not key:
++        print("BALLDONTLIE_API_KEY missing", file=sys.stderr); sys.exit(2)
++    now = datetime.now(timezone.utc)
++    captured = now.isoformat()
++    stem = now.strftime("%Y%m%dT%H%M%SZ")
++    out = Path(a.out_dir) / stem
++    out.mkdir(parents=True, exist_ok=True)
++    s = requests.Session()
++    rows, hashes, cursor, pages = [], [], None, 0
++    for _ in range(a.max_pages):
++        params = {"per_page": 100}
++        if cursor is not None:
++            params["cursor"] = cursor
++        for attempt in range(6):
++            r = s.get(URL, headers={"Authorization": key}, params=params, timeout=40)
++            if r.status_code in (429, 500, 502, 503, 504) and attempt < 5:
++                time.sleep(min(60, 5 * (attempt + 1))); continue
++            break
++        if r.status_code in (401, 403):
++            print(f"key rejected: HTTP {r.status_code}", file=sys.stderr); sys.exit(4)
++        r.raise_for_status()
++        hashes.append(sha(r.text)); pages += 1
++        body = r.json()
++        rows += [normalize(x, captured) for x in body.get("data", [])]
++        cursor = (body.get("meta") or {}).get("next_cursor")
++        if cursor is None:
++            break
++        time.sleep(0.4)
++    with (out / "snapshot.jsonl").open("w") as f:
++        for x in rows:
++            f.write(json.dumps(x, separators=(",", ":")) + "\n")
++    set_hash = sha(json.dumps(sorted(x["row_sha256"] for x in rows)))
++    manifest = {"captured_at_utc": captured, "rows": len(rows), "pages": pages, "complete": cursor is None,
++                "response_sha256": hashes, "set_sha256": set_hash, "source": URL}
++    (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
++    print(json.dumps(manifest, indent=2))
++    gh = os.environ.get("GITHUB_OUTPUT")
++    if gh:
++        with open(gh, "a") as f:
++            f.write(f"dir={out}\nstem={stem}\nrows={len(rows)}\nweek={now.strftime('%G-W%V')}\n")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/r13_data_inventory.py b/scripts/r13_data_inventory.py
+new file mode 100644
+index 0000000..56e9291
+--- /dev/null
++++ b/scripts/r13_data_inventory.py
+@@ -0,0 +1,153 @@
++"""Round 13 data inventory: what can each feature family actually be built from?
++
++--api   bounded probe of BALLDONTLIE endpoints (about 30 requests). Per season it records HTTP status,
++        rows, every field name, and the share of non-null values for each field. That decides whether
++        the tracking / hustle / matchup fields in /nba/v2/stats/advanced (rebound chances, touches,
++        passes, contested shots, box outs, matchup_*) exist historically or only recently.
++--props local inventory of the saved opening-prop file: prop types, market types, vendors, and how many
++        rows carry two-sided prices. That decides which prop markets can be evaluated at all.
++Nothing is modelled here.
++"""
++import argparse, json, os, time
++from collections import Counter, defaultdict
++from pathlib import Path
++
++API = "https://api.balldontlie.io"
++SEASON_DATES = {2023: ("2023-11-15", "2024-01-17", "2024-03-20"), 2024: ("2024-11-13", "2025-01-15", "2025-03-19"),
++                2025: ("2025-11-12", "2026-01-14", "2026-03-18")}
++KEY_FIELDS = ("rebound_chances_total", "rebound_chances_off", "rebound_chances_def", "box_outs", "touches", "passes",
++              "secondary_assists", "free_throw_assists", "contested_fga", "uncontested_fga", "defended_at_rim_fga",
++              "matchup_minutes", "matchup_player_points", "switches_on", "speed", "distance", "deflections",
++              "usage_percentage", "pace", "pct_fga_3pt", "pct_pts_paint", "fouls_drawn", "points_second_chance")
++
++
++def field_coverage(rows):
++    """{field: share of rows where the value is not None} over the union of fields (nested dicts skipped)."""
++    if not rows:
++        return {}
++    counts, n = Counter(), len(rows)
++    fields = set()
++    for r in rows:
++        for k, v in r.items():
++            if isinstance(v, dict):
++                continue
++            fields.add(k)
++            if v is not None:
++                counts[k] += 1
++    return {k: round(counts[k] / n, 3) for k in sorted(fields)}
++
++
++def prop_inventory(props):
++    by_type = defaultdict(Counter)
++    vendors = Counter()
++    for r in props:
++        t = str(r.get("prop_type"))
++        m = r.get("market") or {}
++        by_type[t]["rows"] += 1
++        by_type[t][f"market_{m.get('type')}"] += 1
++        if m.get("type") == "over_under" and m.get("over_odds") is not None and m.get("under_odds") is not None:
++            by_type[t]["two_sided"] += 1
++        vendors[str(r.get("vendor"))] += 1
++    games = len({r.get("game_id") for r in props})
++    return {"rows": len(props), "games": games, "vendors": dict(vendors),
++            "prop_types": {k: dict(v) for k, v in sorted(by_type.items(), key=lambda kv: -kv[1]["rows"])}}
++
++
++def _get(session, url, params, key, tries=5):
++    for attempt in range(tries):
++        try:
++            r = session.get(url, headers={"Authorization": key}, params=params, timeout=40)
++        except Exception as e:  # network failure is a finding, not a crash
++            if attempt == tries - 1:
++                return {"error": f"{type(e).__name__}: {e}"}
++            time.sleep(5 * (attempt + 1)); continue
++        if r.status_code in (429, 500, 502, 503, 504) and attempt < tries - 1:
++            time.sleep(min(60, 5 * (attempt + 1))); continue
++        try:
++            body = r.json()
++        except ValueError:
++            body = {"text": r.text[:300]}
++        return {"status": r.status_code, "body": body}
++    return {"error": "retries exhausted"}
++
++
++def summarize(resp, period_zero=False):
++    if "error" in resp:
++        return {"error": resp["error"]}
++    body = resp["body"] if isinstance(resp.get("body"), dict) else {}
++    rows = body.get("data") if isinstance(body.get("data"), list) else []
++    if period_zero:
++        whole = [r for r in rows if r.get("period") in (0, None)]
++    else:
++        whole = rows
++    cov = field_coverage(whole)
++    return {"status": resp["status"], "rows": len(rows), "rows_used": len(whole),
++            "periods": dict(Counter(str(r.get("period")) for r in rows)) if rows and "period" in rows[0] else None,
++            "key_field_coverage": {k: cov.get(k) for k in KEY_FIELDS if k in cov} or None,
++            "all_field_coverage": cov, "message": None if rows else str(body)[:300]}
++
++
++def api_probe(out):
++    import requests
++    key = os.environ.get("BALLDONTLIE_API_KEY")
++    if not key:
++        raise RuntimeError("BALLDONTLIE_API_KEY missing")
++    s = requests.Session()
++    res = {"advanced_v2": {}, "advanced_v1": {}, "plays": {}, "lineups": {}, "injuries_snapshot": None}
++    for season, dates in SEASON_DATES.items():
++        for d in dates:
++            res["advanced_v2"][f"{season}|{d}"] = summarize(
++                _get(s, f"{API}/nba/v2/stats/advanced", {"seasons[]": season, "dates[]": d, "per_page": 100}, key), True)
++            time.sleep(0.5)
++        res["advanced_v1"][str(season)] = summarize(
++            _get(s, f"{API}/nba/v1/stats/advanced", {"seasons[]": season, "dates[]": dates[1], "per_page": 100}, key), True)
++        g = _get(s, f"{API}/v1/games", {"dates[]": dates[1], "per_page": 5}, key)
++        gid = None
++        if "body" in g and isinstance(g["body"], dict) and g["body"].get("data"):
++            gid = g["body"]["data"][0]["id"]
++        if gid is None:
++            res["plays"][str(season)] = res["lineups"][str(season)] = {"error": "no game id found"}
++            continue
++        for name, params in (("game_id", {"game_id": gid}), ("game_ids[]", {"game_ids[]": gid, "per_page": 100})):
++            sm = summarize(_get(s, f"{API}/nba/v1/plays", params, key))
++            sm.pop("all_field_coverage", None)
++            res["plays"][f"{season}|{name}"] = {**sm, "game_id": gid}
++            time.sleep(0.5)
++        sm = summarize(_get(s, f"{API}/nba/v1/lineups", {"game_ids[]": gid, "per_page": 100}, key))
++        res["lineups"][str(season)] = {**sm, "game_id": gid}
++    res["injuries_snapshot"] = summarize(_get(s, f"{API}/nba/v1/player_injuries", {"per_page": 100}, key))
++    verdict = {}
++    for season in SEASON_DATES:
++        cov = [v.get("key_field_coverage") or {} for k, v in res["advanced_v2"].items() if k.startswith(str(season))]
++        rc = [c.get("rebound_chances_total") for c in cov if c.get("rebound_chances_total") is not None]
++        tc = [c.get("touches") for c in cov if c.get("touches") is not None]
++        verdict[str(season)] = {"tracking_rebound_chances_available": bool(rc) and min(rc) >= 0.8,
++                                "tracking_touches_available": bool(tc) and min(tc) >= 0.8}
++    res["tracking_verdict_by_season"] = verdict
++    out.mkdir(parents=True, exist_ok=True)
++    (out / "api_inventory.json").write_text(json.dumps(res, indent=2) + "\n")
++    print(json.dumps({"tracking_verdict_by_season": verdict,
++                      "advanced_v2": {k: (v.get("status"), v.get("rows"), v.get("key_field_coverage")) for k, v in res["advanced_v2"].items()},
++                      "plays": {k: (v.get("status"), v.get("rows")) for k, v in res["plays"].items()},
++                      "lineups": {k: (v.get("status"), v.get("rows")) for k, v in res["lineups"].items()}}, indent=2))
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--api", action="store_true")
++    p.add_argument("--props")
++    p.add_argument("--out", required=True)
++    a = p.parse_args()
++    out = Path(a.out)
++    if a.props:
++        rows = [json.loads(x) for x in Path(a.props).open() if x.strip()]
++        inv = prop_inventory(rows)
++        out.mkdir(parents=True, exist_ok=True)
++        (out / "prop_market_inventory.json").write_text(json.dumps(inv, indent=2) + "\n")
++        print(json.dumps(inv, indent=2))
++    if a.api:
++        api_probe(out)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/r13_opportunity.py b/scripts/r13_opportunity.py
+new file mode 100644
+index 0000000..4b62c4e
+--- /dev/null
++++ b/scripts/r13_opportunity.py
+@@ -0,0 +1,211 @@
++"""Round 13 (pre-registered in PREREG_R13_OPPORTUNITY.md): minutes / opportunity model.
++
++Part A (no prices): does a minutes model beat an exponentially weighted minutes average on unseen
++games? Trained on 2023-24 + 2024-25 box scores, evaluated on all 2025-26 player-games.
++Part B (prices): do the model's prop probabilities, or the opportunity features behind them, add
++out-of-sample information beyond the de-vigged 2025-26 opening price? Same harness as R11
++(train before SPLIT_DATE, test after, game-cluster bootstrap, BH-FDR q = 0.10, sign stability).
++Neither part is a betting rule.
++"""
++import argparse, json, math
++from collections import Counter, defaultdict
++from pathlib import Path
++
++import numpy as np
++
++from scripts.backtest_prop_holdout import ALIASES, VENDORS
++from scripts.feature_info_test import FDR_Q, SPLIT_DATE, benjamini_hochberg, evaluate_feature, logit
++from v13.minutes_model import QUANTILES, STATS, MinutesModel, nb_dispersion, nb_over_prob
++from v13.minutes_model import build as build_features
++from v13.pricing import power_devig_pair, prop_prices
++from v13.provenance import require_eligible
++
++TRAIN_SEASONS = (2023, 2024)
++TEST_SEASON = 2025
++REGISTRY = {
++    "points": ["model_edge", "vacated_min", "trend"],
++    "rebounds": ["model_edge", "vacated_min"],
++    "assists": ["model_edge", "vacated_min"],
++    "threes": ["model_edge"],
++    "pra": ["model_edge", "vacated_min", "return_flag"],
++}
++PASS_A = {"coverage_lo": 0.77, "coverage_hi": 0.83}
++BOOT = 1000
++
++
++def read(p):
++    return [json.loads(x) for x in Path(p).open() if x.strip()]
++
++
++def cluster_ci(values, groups, reps=BOOT, seed=13):
++    by = defaultdict(list)
++    for v, g in zip(values, groups):
++        by[g].append(v)
++    arr = [np.array(v) for v in by.values()]
++    rng = np.random.default_rng(seed)
++    boots = [np.concatenate([arr[i] for i in rng.integers(0, len(arr), len(arr))]).mean() for _ in range(reps)]
++    return [round(float(np.percentile(boots, 2.5)), 4), round(float(np.percentile(boots, 97.5)), 4)]
++
++
++def part_a(train, test, model):
++    y = np.array([it["minutes"] for it in test])
++    pm = model.predict_mean(test)
++    base = {"ewma": np.array([it["features"]["m_ewma"] for it in test]),
++            "last10": np.array([it["features"]["m_l10"] for it in test])}
++    q = model.predict_quantiles(test)
++    gids = [it["gid"] for it in test]
++    d = np.abs(y - pm) - np.abs(y - base["ewma"])
++    cover = float(np.mean((y >= q[:, 0]) & (y <= q[:, 2])))
++    pinball = {str(qq): round(float(np.mean(np.maximum(qq * (y - q[:, i]), (qq - 1) * (y - q[:, i])))), 4)
++               for i, qq in enumerate(QUANTILES)}
++    ci = cluster_ci(d, gids)
++    slices = {}
++    for name, mask in (("vacated_min_gt_0", [it["features"]["vacated_min"] > 0 for it in test]),
++                       ("return_flag", [it["features"]["return_flag"] == 1 for it in test]),
++                       ("b2b", [it["features"]["b2b"] == 1 for it in test]),
++                       ("trend_abs_ge_5", [abs(it["features"]["trend"]) >= 5 for it in test])):
++        m = np.array(mask)
++        if m.sum():
++            slices[name] = {"n": int(m.sum()), "mae_model": round(float(np.abs(y - pm)[m].mean()), 3),
++                            "mae_ewma": round(float(np.abs(y - base["ewma"])[m].mean()), 3)}
++    checks = {"mae_improvement_ci_upper_lt_0": ci[1] < 0, "mean_improvement_lt_0": float(d.mean()) < 0,
++              "interval_80_coverage_in_range": PASS_A["coverage_lo"] <= cover <= PASS_A["coverage_hi"]}
++    return {"verdict": "PASS" if all(checks.values()) else "FAIL", "checks": checks,
++            "train_player_games": len(train), "test_player_games": len(test),
++            "mae": {"model": round(float(np.abs(y - pm).mean()), 3),
++                    **{k: round(float(np.abs(y - v).mean()), 3) for k, v in base.items()}},
++            "rmse": {"model": round(float(np.sqrt(np.mean((y - pm) ** 2))), 3),
++                     **{k: round(float(np.sqrt(np.mean((y - v) ** 2))), 3) for k, v in base.items()}},
++            "mae_diff_vs_ewma": round(float(d.mean()), 4), "mae_diff_95ci": ci,
++            "interval_80_coverage": round(cover, 4), "pinball": pinball, "slices": slices,
++            "coefficients": model.coefficients()}
++
++
++def stat_projection(items, model):
++    pm = model.predict_mean(items)
++    out = {}
++    for m in STATS:
++        mu, mu_b, y = [], [], []
++        for it, p in zip(items, pm):
++            r = it["rates"].get(m)
++            if r is None:
++                continue
++            mu.append(p * r); mu_b.append(it["features"]["m_ewma"] * r); y.append(it["stats"][m])
++        out[m] = (np.array(mu), np.array(mu_b), np.array(y))
++    return out
++
++
++def candidates(props, items, model, phis):
++    pm = {}
++    keyed = list(items)
++    for it, p in zip(keyed, model.predict_mean(keyed)):
++        pm[(it["gid"], it["pid"])] = p
++    look = {(it["gid"], it["pid"]): it for it in keyed}
++    best = {}
++    for r in props:
++        m = ALIASES.get(r.get("prop_type"))
++        if m not in REGISTRY or (r.get("market") or {}).get("type") != "over_under":
++            continue
++        over, under = prop_prices(r)
++        if over is None or under is None or r.get("line_value") is None:
++            continue
++        key = (str(r["game_id"]), str(r["player_id"]), m)
++        v = str(r.get("vendor") or "").lower()
++        rank = (VENDORS.index(v) if v in VENDORS else 99, str(r.get("opened_at")))
++        if key not in best or rank < best[key][0]:
++            best[key] = (rank, float(r["line_value"]), over, under)
++    rows, skipped = [], Counter()
++    for (gid, pid, m), (_, line, over, under) in best.items():
++        it = look.get((gid, pid))
++        if it is None:
++            skipped["no_box_score_or_history"] += 1; continue
++        val = it["stats"][m]
++        if abs(val - line) < 1e-9:
++            skipped["push"] += 1; continue
++        rate = it["rates"].get(m)
++        if rate is None:
++            skipped["no_rate"] += 1; continue
++        p_mkt = power_devig_pair(over, under)[0]
++        p_mod = nb_over_prob(pm[(gid, pid)] * rate, phis[m], line)
++        f = dict(it["features"]); f["model_edge"] = logit(p_mod) - logit(p_mkt)
++        rows.append({"game_id": gid, "date": it["date"], "market": m, "y": int(val > line), "lp": logit(p_mkt),
++                     "p_model": p_mod, "p_market": p_mkt, "f": f})
++    return rows, skipped
++
++
++def scores(rows):
++    y = np.array([r["y"] for r in rows], float)
++    out = {}
++    for name, key in (("market", "p_market"), ("model", "p_model")):
++        p = np.clip(np.array([r[key] for r in rows]), 1e-6, 1 - 1e-6)
++        out[name] = {"log_loss": round(float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))), 5),
++                     "brier": round(float(np.mean((p - y) ** 2)), 5)}
++    return out
++
++
++def run(stats, games, props, validated=True):
++    if validated:
++        require_eligible(props, "R13 opportunity information test")
++    feats = build_features(stats, games)
++    items = [{"gid": g, "pid": p, **v} for (g, p), v in feats.items()]
++    train = [it for it in items if it["season"] in TRAIN_SEASONS]
++    test = [it for it in items if it["season"] == TEST_SEASON]
++    if len(train) < 1000 or len(test) < 500:
++        return {"status": "insufficient", "train": len(train), "test": len(test)}
++    model = MinutesModel().fit(train)
++    a = part_a(train, test, model)
++    proj = {}
++    phis = {}
++    tr = stat_projection(train, model)
++    for m, (mu, mu_b, y) in tr.items():
++        phis[m] = nb_dispersion(mu, y)
++    for m, (mu, mu_b, y) in stat_projection(test, model).items():
++        proj[m] = {"n": int(len(y)), "mae_model_minutes_x_rate": round(float(np.abs(y - mu).mean()), 3),
++                   "mae_ewma_minutes_x_rate": round(float(np.abs(y - mu_b).mean()), 3), "nb_phi_train": round(phis[m], 4)}
++    rows, skipped = candidates(props, test, model, phis)
++    results, keys, pv = {}, [], []
++    for m, fs in REGISTRY.items():
++        mr = [r for r in rows if r["market"] == m]
++        for f in fs:
++            res = evaluate_feature(mr, f)
++            results[f"{m}|{f}"] = res
++            if res["status"] == "tested":
++                keys.append(f"{m}|{f}"); pv.append(res["p_one_sided"])
++    sig = benjamini_hochberg(pv, FDR_Q) if pv else []
++    for k, s in zip(keys, sig):
++        r = results[k]
++        r["bh_significant"] = s
++        r["verdict"] = "PASS" if (s and r["delta_logloss"] < 0 and r["delta_95ci"][1] < 0 and r["sign_stable"]) else "FAIL"
++    test_rows = [r for r in rows if r["date"] >= SPLIT_DATE]
++    return {"part_a_minutes": a, "stat_projection_2025": proj,
++            "part_b_information": {"registry": REGISTRY, "split_date": SPLIT_DATE, "fdr_q": FDR_Q, "tests": len(keys),
++                                   "rows_by_market": dict(Counter(r["market"] for r in rows)), "skipped": dict(skipped),
++                                   "results": results, "passing": [k for k in keys if results[k]["verdict"] == "PASS"],
++                                   "probability_scores_test_window": {m: scores([r for r in test_rows if r["market"] == m])
++                                                                      for m in REGISTRY if any(r["market"] == m for r in test_rows)}},
++            "evidence_class": "validated" if validated else "exploratory_unverified_prices",
++            "cumulative_market_tests_on_2025_26_window": {"R11": 11, "R12": 2, "R13": len(keys),
++                                                          "note": "The same 2025-26 prices have now been screened repeatedly. "
++                                                                  "Anything passing is a candidate for 2026-27 prospective confirmation only."},
++            "reading_guide": "Part A PASS = better minutes forecasts than a weighted average on unseen games (a prediction "
++                             "result, not an edge). Part B PASS = information beyond the opening price on the test window."}
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--stats", action="append", required=True)
++    p.add_argument("--games", action="append", required=True)
++    p.add_argument("--props", required=True)
++    p.add_argument("--out", required=True)
++    a = p.parse_args()
++    res = run([s for f in a.stats for s in read(f)], [g for f in a.games for g in read(f)], read(a.props))
++    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
++    Path(a.out).write_text(json.dumps(res, indent=2) + "\n")
++    print(json.dumps({k: v for k, v in res.get("part_a_minutes", res).items() if k != "coefficients"}, indent=2))
++    print(json.dumps(res.get("stat_projection_2025"), indent=2))
++    for k, v in (res.get("part_b_information") or {}).get("results", {}).items():
++        print(k, v.get("verdict", v["status"]), v.get("delta_logloss"), v.get("delta_95ci"), v.get("p_one_sided"))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_collection_guard.py b/tests/test_collection_guard.py
+new file mode 100644
+index 0000000..84f82de
+--- /dev/null
++++ b/tests/test_collection_guard.py
+@@ -0,0 +1,22 @@
++"""Guard: pytest's default patterns (test_*.py, *_test.py; test_* functions) must not match
++production modules, or CI collects helpers as tests (Round 11 CI failure)."""
++import re
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def test_no_collectable_test_functions_outside_tests():
++    bad = []
++    for d in ("scripts", "v13"):
++        for p in (ROOT / d).rglob("*.py"):
++            if re.match(r"(test_.*|.*_test)\.py$", p.name):
++                for i, line in enumerate(p.read_text().splitlines(), 1):
++                    if re.match(r"\s*def test", line) or re.match(r"\s*class Test", line):
++                        bad.append(f"{p.relative_to(ROOT)}:{i}")
++    assert not bad, bad
++
++
++def test_pytest_ini_restricts_collection_to_tests():
++    text = (ROOT / "pytest.ini").read_text()
++    assert re.search(r"^testpaths\s*=\s*tests\s*$", text, re.M)
+diff --git a/tests/test_round13.py b/tests/test_round13.py
+new file mode 100644
+index 0000000..7f4e2d5
+--- /dev/null
++++ b/tests/test_round13.py
+@@ -0,0 +1,189 @@
++import math
++import random
++from datetime import date, timedelta
++
++import pytest
++
++from v13.minutes_model import FEATURES, MinutesModel, build, ewma, nb_dispersion, nb_over_prob
++from v13.provenance import UnverifiedOddsError, quarantine
++
++
++def to_am(p):
++    p = min(max(p, 0.03), 0.97)
++    return int(round(-100 * p / (1 - p))) if p >= 0.5 else int(round(100 * (1 - p) / p))
++
++
++def poisson_over(mu, line):
++    k = math.floor(line)
++    return 1 - sum(math.exp(-mu) * mu ** j / math.factorial(j) for j in range(k + 1))
++
++
++SEASON_STARTS = {2023: date(2023, 10, 24), 2024: date(2024, 10, 22), 2025: date(2025, 10, 22)}
++
++
++def league(seed=0, market_knows_absences=False, days=160):
++    """6 teams x 9 players. Players miss stretches of games; their minutes go to present teammates
++    in proportion to base minutes. Points ~ Poisson(rate x minutes). 2025-26 props are priced from
++    full-roster minutes (market ignores absences) unless market_knows_absences."""
++    rng = random.Random(seed)
++    teams = {t: [(t * 100 + k, rng.uniform(8, 36), rng.uniform(0.3, 0.75)) for k in range(9)] for t in range(1, 7)}
++    out_until = {}
++    stats, games, props = [], [], []
++    gid = 0
++    for season, start in SEASON_STARTS.items():
++        team_games = {t: 0 for t in teams}
++        out_until = {}
++        for d in range(days):
++            day = (start + timedelta(days=d)).isoformat()
++            order = list(teams); rng.shuffle(order)
++            for i in (0, 2):
++                h, a = order[i], order[i + 1]; gid += 1
++                games.append({"id": gid, "date": day, "datetime": day + "T23:30:00Z", "season": season, "period": 4,
++                              "home_team": {"id": h}, "visitor_team": {"id": a}, "status": "Final", "postseason": False})
++                for team in (h, a):
++                    team_games[team] += 1
++                    n = team_games[team]
++                    roster = teams[team]
++                    for pid, base, _ in roster:
++                        if out_until.get(pid, 0) < n and rng.random() < 0.04:
++                            out_until[pid] = n + rng.randint(2, 6)
++                    present = [(pid, base, rate) for pid, base, rate in roster if out_until.get(pid, 0) < n]
++                    tot = sum(b for _, b, _ in present); full = sum(b for _, b, _ in roster)
++                    for pid, base, rate in present:
++                        exp_min = min(42.0, 240.0 * base / tot)
++                        mins = max(1.0, exp_min + rng.gauss(0, 2.5))
++                        pts = sum(rng.random() < rate * mins / 60 for _ in range(60))
++                        stats.append({"min": f"{int(mins)}:{int((mins % 1) * 60):02d}", "pts": pts, "reb": 3, "ast": 2,
++                                      "fg3m": 1, "pf": 2, "player": {"id": pid}, "team": {"id": team},
++                                      "game": {"id": gid, "date": day, "season": season}})
++                        if season == 2025:
++                            mkt_min = exp_min if market_knows_absences else min(42.0, 240.0 * base / full)
++                            mu = rate * mkt_min
++                            line = math.floor(mu) + 0.5
++                            po = poisson_over(mu, line)
++                            props.append({"game_id": gid, "player_id": pid, "vendor": "draftkings", "prop_type": "points",
++                                          "line_value": str(line), "opened_at": day + "T15:00:00Z",
++                                          "market": {"type": "over_under", "over_odds": to_am(po), "under_odds": to_am(1 - po)}})
++    gated, _, _ = quarantine(props, games, "bdl_opening_player_props")
++    return stats, games, gated, props
++
++
++@pytest.fixture(scope="module")
++def blind_world():
++    return league(seed=1)
++
++
++def test_features_use_only_earlier_days(blind_world):
++    stats, games, _, _ = blind_world
++    last_day = max(str(g["date"]) for g in games)
++    before = build(stats, games)
++    changed = [dict(r, min="40:00", pts=60) if r["game"]["date"] == last_day else r for r in stats]
++    after = build(changed, games)
++    keys = [k for k, v in before.items() if v["date"] == last_day]
++    assert keys
++    for k in keys:
++        assert before[k]["features"] == after[k]["features"]
++        assert before[k]["rates"] == after[k]["rates"]
++
++
++def test_vacated_minutes_detected_from_previous_game_only():
++    games = [{"id": i, "date": f"2025-11-0{i}", "season": 2025, "period": 4, "postseason": False,
++              "home_team": {"id": 1}, "visitor_team": {"id": 2}} for i in range(1, 6)]
++    stats = []
++    for g in range(1, 6):
++        for pid in (10, 11):
++            if pid == 11 and g == 4:
++                continue  # star misses game 4
++            stats.append({"min": "30:00", "pts": 10, "pf": 1, "player": {"id": pid}, "team": {"id": 1},
++                          "game": {"id": g, "date": f"2025-11-0{g}"}})
++    f = build(stats, games)
++    assert f[("4", "10")]["features"]["vacated_min"] == 0          # absence in game 4 not known before game 4
++    assert f[("5", "10")]["features"]["vacated_min"] == pytest.approx(30.0)  # known before game 5
++    assert f[("5", "11")]["features"]["missed_before"] == 1
++
++
++def test_overtime_minutes_are_scaled_in_history():
++    games = [{"id": i, "date": f"2025-11-0{i}", "season": 2025, "period": 5 if i == 1 else 4, "postseason": False,
++              "home_team": {"id": 1}, "visitor_team": {"id": 2}} for i in range(1, 5)]
++    stats = [{"min": "53:00" if g == 1 else "48:00", "pts": 10, "player": {"id": 7}, "team": {"id": 1},
++              "game": {"id": g, "date": f"2025-11-0{g}"}} for g in range(1, 5)]
++    f = build(stats, games)[("4", "7")]["features"]
++    assert f["m_l3"] == pytest.approx((53 * 48 / 53 + 48 + 48) / 3)
++
++
++def test_negative_binomial_probability():
++    # tiny dispersion -> Poisson
++    assert nb_over_prob(10.0, 1e-6, 9.5) == pytest.approx(poisson_over(10.0, 9.5), abs=1e-3)
++    # more dispersion widens tails: P(X > 15.5) rises
++    assert nb_over_prob(10.0, 0.3, 15.5) > nb_over_prob(10.0, 0.01, 15.5)
++    assert nb_dispersion([5.0] * 4, [5.0, 5.0, 5.0, 5.0]) == pytest.approx(1e-6)
++    assert ewma([1.0, 1.0, 1.0], 5) == 1.0
++
++
++def test_minutes_model_beats_ewma_when_absences_drive_minutes(blind_world):
++    from scripts.r13_opportunity import run
++    stats, games, gated, _ = blind_world
++    res = run(stats, games, gated)
++    a = res["part_a_minutes"]
++    assert a["checks"]["mae_improvement_ci_upper_lt_0"], a
++    assert a["mae"]["model"] < a["mae"]["ewma"]
++    assert 0.70 <= a["interval_80_coverage"] <= 0.90
++    assert a["coefficients"]["vacated_min"] > 0
++    b = res["part_b_information"]["results"]
++    assert b["points|model_edge"]["verdict"] == "PASS", b["points|model_edge"]
++    assert b["points|vacated_min"]["delta_logloss"] < 0
++
++
++def test_no_information_when_market_already_knows():
++    from scripts.r13_opportunity import run
++    stats, games, gated, _ = league(seed=1, market_knows_absences=True)
++    b = run(stats, games, gated)["part_b_information"]["results"]
++    assert b["points|model_edge"]["verdict"] == "FAIL"
++    assert b["points|vacated_min"]["verdict"] == "FAIL"
++
++
++def test_refuses_ungated_props(blind_world):
++    from scripts.r13_opportunity import run
++    stats, games, _, raw = blind_world
++    with pytest.raises(UnverifiedOddsError):
++        run(stats, games, raw)
++
++
++def test_feature_list_is_complete(blind_world):
++    stats, games, _, _ = blind_world
++    one = next(iter(build(stats[:3000], games).values()))
++    assert set(one["features"]) == set(FEATURES)
++
++
++def test_inventory_helpers():
++    from scripts.r13_data_inventory import field_coverage, prop_inventory, summarize
++    rows = [{"period": 0, "touches": 50, "rebound_chances_total": None, "player": {"id": 1}},
++            {"period": 0, "touches": None, "rebound_chances_total": None, "player": {"id": 2}},
++            {"period": 1, "touches": 9, "rebound_chances_total": 3, "player": {"id": 1}}]
++    cov = field_coverage(rows[:2])
++    assert cov["touches"] == 0.5 and cov["rebound_chances_total"] == 0.0 and "player" not in cov
++    sm = summarize({"status": 200, "body": {"data": rows}}, period_zero=True)
++    assert sm["rows"] == 3 and sm["rows_used"] == 2 and sm["key_field_coverage"]["touches"] == 0.5
++    assert summarize({"error": "x"}) == {"error": "x"}
++    inv = prop_inventory([
++        {"prop_type": "points", "vendor": "fanduel", "game_id": 1, "market": {"type": "over_under", "over_odds": -110, "under_odds": -110}},
++        {"prop_type": "steals", "vendor": "fanduel", "game_id": 1, "market": {"type": "milestone", "odds": 300}},
++    ])
++    assert inv["prop_types"]["points"]["two_sided"] == 1 and inv["prop_types"]["steals"].get("two_sided", 0) == 0
++    assert inv["games"] == 1
++
++
++def test_injury_capture_normalize_and_status_changes():
++    from scripts.capture_injuries import normalize, status_changes
++    raw = {"player": {"id": 5, "first_name": "A", "last_name": "B", "team_id": 9}, "status": "Out",
++           "return_date": "Nov 3", "description": "ankle"}
++    n1 = normalize(raw, "2026-10-21T15:00:00+00:00")
++    n2 = normalize(raw, "2026-10-21T15:30:00+00:00")
++    assert n1["player_id"] == 5 and n1["team_id"] == 9 and n1["row_sha256"] == n2["row_sha256"]
++    snaps = [("2026-10-21T16:00:00+00:00", [{"player_id": 5, "status": "Out"}, {"player_id": 6, "status": "Questionable"}]),
++             ("2026-10-21T15:00:00+00:00", [{"player_id": 6, "status": "Questionable"}]),
++             ("2026-10-21T17:00:00+00:00", [{"player_id": 5, "status": "Out"}])]
++    ev = status_changes(snaps)
++    assert {(e["player_id"], e["old_status"], e["new_status"], e["first_seen_utc"]) for e in ev} == {
++        (5, "not_listed", "Out", "2026-10-21T16:00:00+00:00"),
++        (6, "Questionable", "not_listed", "2026-10-21T17:00:00+00:00")}
+diff --git a/v13/minutes_model.py b/v13/minutes_model.py
+new file mode 100644
+index 0000000..eed5bd5
+--- /dev/null
++++ b/v13/minutes_model.py
+@@ -0,0 +1,224 @@
++"""Round 13: pregame minutes / opportunity features and a minutes-distribution model.
++
++Every feature for a player-game uses only games played on strictly earlier days. Inputs are
++regular-season box scores (played rows only, min > 0) and the game index. Nothing here uses
++prices, injury reports or same-game information.
++
++Absence is never read from the current game's box score (that is only known after tip).
++The pregame-safe proxy is: a rotation teammate who did NOT play in the team's PREVIOUS game.
++"""
++import math
++from collections import defaultdict, deque
++from datetime import date
++
++import numpy as np
++
++from scripts.regular_season_filter import minutes as parse_minutes
++
++FEATURES = ("m_l3", "m_l5", "m_l10", "m_l20", "m_ewma", "m_sd10", "trend", "days_rest", "b2b",
++            "three_in_four", "four_in_six", "missed_before", "return_flag", "vacated_min", "vacated_n",
++            "top5_last", "pf_per36", "log_games")
++ROTATION_MIN = 15.0      # a teammate counts as rotation if his last-10 average is at least this
++EWMA_HALFLIFE = 5.0      # games
++RATE_HALFLIFE = 10.0     # games, per-minute stat rates
++MIN_HISTORY = 3          # player games required before features are produced
++STATS = {"points": ("pts",), "rebounds": ("reb",), "assists": ("ast",), "threes": ("fg3m",), "pra": ("pts", "reb", "ast")}
++QUANTILES = (0.1, 0.5, 0.9)
++BUCKETS = (15.0, 25.0, 32.0)  # predicted-minutes buckets for the residual distribution
++
++
++def _f(r, k):
++    try:
++        return float(r.get(k) or 0)
++    except (TypeError, ValueError):
++        return 0.0
++
++
++def ot_periods(game):
++    try:
++        return max(0, int(game.get("period") or 4) - 4)
++    except (TypeError, ValueError):
++        return 0
++
++
++def ewma(values, halflife):
++    if not values:
++        return None
++    a = 1 - 0.5 ** (1 / halflife)
++    s = values[0]
++    for v in values[1:]:
++        s = a * v + (1 - a) * s
++    return s
++
++
++def build(stats, games):
++    """(game_id, player_id) -> {"features": {...}, "minutes": actual, "stats": {...}, "rates": {...},
++    "date": ..., "season": ...}. Features and rates come only from strictly earlier days."""
++    gmeta = {str(g["id"]): g for g in games}
++    team_sched = defaultdict(list)  # team -> sorted [(date, gid)]
++    for g in games:
++        if g.get("postseason"):
++            continue
++        d = str(g.get("date"))[:10]
++        for side in ("home_team", "visitor_team"):
++            t = (g.get(side) or {}).get("id")
++            if t is not None:
++                team_sched[str(t)].append((d, str(g["id"])))
++    for t in team_sched:
++        team_sched[t].sort()
++    rows = []
++    for r in stats:
++        g, pl, tm = r.get("game") or {}, r.get("player") or {}, r.get("team") or {}
++        if g.get("id") is None or pl.get("id") is None or tm.get("id") is None:
++            continue
++        gid = str(g["id"])
++        meta = gmeta.get(gid, {})
++        rows.append({"gid": gid, "date": str(g.get("date") or meta.get("date"))[:10], "pid": str(pl["id"]),
++                     "tid": str(tm["id"]), "min": parse_minutes(r.get("min")), "row": r,
++                     "ot": ot_periods(meta or g), "season": meta.get("season", g.get("season"))})
++    by_date = defaultdict(list)
++    for x in rows:
++        by_date[x["date"]].append(x)
++    played = defaultdict(set)                        # gid -> set of pids who played
++    game_minutes = defaultdict(dict)                 # gid -> {pid: minutes}
++    hist = defaultdict(lambda: deque(maxlen=40))     # pid -> recent dicts
++    last_team = {}                                   # pid -> team of most recent row
++    games_seen = defaultdict(int)
++    out = {}
++    roster = defaultdict(set)                        # team -> pids whose most recent row is for it
++    for day in sorted(by_date):
++        today = by_date[day]
++        vac_cache = {}
++        for x in today:
++            h = list(hist[x["pid"]])
++            if len(h) < MIN_HISTORY:
++                continue
++            adj = [p["min_adj"] for p in h]
++            l = lambda n: sum(adj[-n:]) / len(adj[-n:])
++            sched = [s for s in team_sched.get(x["tid"], []) if s[0] < day]
++            prev_gid = sched[-1][1] if sched else None
++            # own missed team games since last appearance
++            last_gid = h[-1]["gid"]
++            missed = 0
++            if h[-1]["tid"] == x["tid"]:  # after a trade, missed games for the new team are undefined: 0
++                for d_, g_ in reversed(sched):
++                    if g_ == last_gid:
++                        break
++                    missed += 1
++            # rotation teammates absent from the team's previous game (pregame-known)
++            if x["tid"] not in vac_cache:
++                absent = []
++                if prev_gid is not None:
++                    recent_team_games = {g_ for _, g_ in sched[-5:]}
++                    for pid in roster[x["tid"]]:
++                        ph = hist[pid]
++                        if not ph or ph[-1]["gid"] not in recent_team_games:
++                            continue
++                        avg = sum(p["min_adj"] for p in list(ph)[-10:]) / min(10, len(ph))
++                        if avg >= ROTATION_MIN and pid not in played.get(prev_gid, set()):
++                            absent.append((pid, avg))
++                vac_cache[x["tid"]] = absent
++            others = [a for pid, a in vac_cache[x["tid"]] if pid != x["pid"]]
++            vac_min, vac_n = sum(others), len(others)
++            top5 = 0
++            if prev_gid is not None and x["pid"] in game_minutes.get(prev_gid, {}):
++                ranked = sorted(game_minutes[prev_gid].items(), key=lambda kv: -kv[1])
++                team_ranked = [pid for pid, _ in ranked if last_team.get(pid) == x["tid"]][:5]
++                top5 = int(x["pid"] in team_ranked)
++            d0 = date.fromisoformat(day)
++            dates = [date.fromisoformat(d_) for d_, _ in sched]
++            last_play = date.fromisoformat(h[-1]["date"])
++            mins20 = [p["min"] for p in h[-20:]]
++            pf20 = [p["pf"] for p in h[-20:]]
++            f = {"m_l3": l(3), "m_l5": l(5), "m_l10": l(10), "m_l20": l(20), "m_ewma": ewma(adj, EWMA_HALFLIFE),
++                 "m_sd10": float(np.std(adj[-10:])), "trend": l(3) - l(20),
++                 "days_rest": min(5, (d0 - last_play).days),
++                 "b2b": int(any((d0 - d).days == 1 for d in dates)),
++                 "three_in_four": int(sum(1 for d in dates if (d0 - d).days <= 3) >= 2),
++                 "four_in_six": int(sum(1 for d in dates if (d0 - d).days <= 5) >= 3),
++                 "missed_before": min(10, missed), "return_flag": int(missed >= 3),
++                 "vacated_min": vac_min, "vacated_n": vac_n, "top5_last": top5,
++                 "pf_per36": 36 * sum(pf20) / max(1.0, sum(mins20)), "log_games": math.log1p(games_seen[x["pid"]])}
++            rates = {}
++            for m, keys in STATS.items():
++                per = [sum(p[k] for k in keys) / p["min"] for p in h if p["min"] >= 5]
++                rates[m] = ewma(per, RATE_HALFLIFE) if per else None
++            out[(x["gid"], x["pid"])] = {"features": f, "minutes": x["min"], "date": day, "season": x["season"],
++                                         "tid": x["tid"], "rates": rates,
++                                         "stats": {m: sum(_f(x["row"], k) for k in keys) for m, keys in STATS.items()}}
++        # update state with today's results only after all of today's features exist
++        for x in today:
++            played[x["gid"]].add(x["pid"])
++            game_minutes[x["gid"]][x["pid"]] = x["min"]
++        for x in today:
++            adj = x["min"] * 48.0 / (48.0 + 5.0 * x["ot"])
++            vals = {k: _f(x["row"], k) for k in ("pts", "reb", "ast", "fg3m")}
++            hist[x["pid"]].append({"gid": x["gid"], "tid": x["tid"], "date": day, "min": x["min"], "min_adj": adj,
++                                   "pf": _f(x["row"], "pf"), **vals})
++            if last_team.get(x["pid"]) not in (None, x["tid"]):
++                roster[last_team[x["pid"]]].discard(x["pid"])
++            last_team[x["pid"]] = x["tid"]
++            roster[x["tid"]].add(x["pid"])
++            games_seen[x["pid"]] += 1
++    return out
++
++
++def design(items):
++    X = np.array([[it["features"][k] for k in FEATURES] for it in items], dtype=float)
++    return X
++
++
++class MinutesModel:
++    """Ridge regression on standardized features + empirical residual quantiles by predicted-minutes bucket."""
++
++    def __init__(self, ridge=10.0):
++        self.ridge = ridge
++
++    def fit(self, items):
++        X = design(items); y = np.array([it["minutes"] for it in items], dtype=float)
++        self.mu, self.sd = X.mean(0), X.std(0)
++        self.sd[self.sd < 1e-9] = 1.0
++        Z = np.column_stack([np.ones(len(X)), (X - self.mu) / self.sd])
++        pen = np.eye(Z.shape[1]) * self.ridge; pen[0, 0] = 0
++        self.beta = np.linalg.solve(Z.T @ Z + pen, Z.T @ y)
++        pred = self.predict_mean(items)
++        res = y - pred
++        b = np.digitize(pred, BUCKETS)
++        self.res_q = {}
++        for k in range(len(BUCKETS) + 1):
++            r = res[b == k] if (b == k).sum() >= 50 else res
++            self.res_q[k] = [float(np.quantile(r, q)) for q in QUANTILES]
++        return self
++
++    def predict_mean(self, items):
++        X = design(items)
++        Z = np.column_stack([np.ones(len(X)), (X - self.mu) / self.sd])
++        return np.clip(Z @ self.beta, 0, 48)
++
++    def predict_quantiles(self, items):
++        pred = self.predict_mean(items)
++        b = np.digitize(pred, BUCKETS)
++        return np.array([[np.clip(p + self.res_q[k][i], 0, 53) for i in range(len(QUANTILES))] for p, k in zip(pred, b)])
++
++    def coefficients(self):
++        return {k: round(float(v), 4) for k, v in zip(("intercept",) + FEATURES, self.beta)}
++
++
++def nb_dispersion(mu, y):
++    """Method-of-moments NB dispersion phi in Var = mu + phi*mu^2 (phi >= 0)."""
++    mu, y = np.asarray(mu, float), np.asarray(y, float)
++    phi = float(np.mean((y - mu) ** 2 - mu) / max(1e-9, np.mean(mu ** 2)))
++    return max(phi, 1e-6)
++
++
++def nb_over_prob(mu, phi, line):
++    """P(X > line) for X ~ NegBin(mean mu, Var = mu + phi*mu^2); line is usually a half-point."""
++    mu = max(mu, 1e-6)
++    r = 1.0 / phi
++    p0 = (r / (r + mu)) ** r
++    k_max = int(math.floor(line))
++    cdf, pk = 0.0, p0
++    for k in range(k_max + 1):
++        cdf += pk
++        pk *= (k + r) / (k + 1) * mu / (r + mu)
++    return min(max(1.0 - cdf, 1e-6), 1 - 1e-6)
+-- 
+2.43.0
+
