@@ -1,0 +1,447 @@
+From 15163972c2f1d7fcdb9684a905e5d6fd2cf25eea Mon Sep 17 00:00:00 2001
+From: Claude audit <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 17:03:51 -0500
+Subject: [PATCH] Round 7: coverage audit, UNTESTABLE instead of crash in
+ ranking, per-season counts, rebounds 2024 pre-registration + runner, season
+ prop collector, logger pagination
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ PREREG_REBOUNDS_2024.md                 | 28 ++++++++
+ scripts/backtest_prop_holdout_v2.py     |  3 +-
+ scripts/collect_season_prop_openings.py | 60 +++++++++++++++++
+ scripts/game_model_v2.py                |  7 +-
+ scripts/log_live_odds.py                | 13 +++-
+ scripts/odds_coverage_audit.py          | 89 +++++++++++++++++++++++++
+ scripts/prereg_v2_market.py             | 82 +++++++++++++++++++++++
+ scripts/rank_and_stake.py               | 12 +++-
+ tests/test_round7.py                    | 36 ++++++++++
+ 9 files changed, 324 insertions(+), 6 deletions(-)
+ create mode 100644 PREREG_REBOUNDS_2024.md
+ create mode 100644 scripts/collect_season_prop_openings.py
+ create mode 100644 scripts/odds_coverage_audit.py
+ create mode 100644 scripts/prereg_v2_market.py
+ create mode 100644 tests/test_round7.py
+
+diff --git a/PREREG_REBOUNDS_2024.md b/PREREG_REBOUNDS_2024.md
+new file mode 100644
+index 0000000..211c7c6
+--- /dev/null
++++ b/PREREG_REBOUNDS_2024.md
+@@ -0,0 +1,28 @@
++# Pre-registration: 2024–25 rebounds procedure replication (v2 pipeline)
++
++**Committed before any 2024–25 rebounds prop line is downloaded or graded.** As of this commit, no 2024–25 rebounds lines exist in the project: Prop Integrity v2 reported zero 2024 training coverage for rebounds.
++
++## Origin of the hypothesis (exploratory, not evidence)
++In the 2025–26 within-season v2 run (Prop Integrity v2, run 38642017481), the edge selector made 336 rebounds bets: actual-price ROI +6.88%, excess +7.02 pp over the de-vigged market, z = 2.59. That was the best of 5 markets × 2 selectors examined, so it is a selected result and needs a replication it played no part in.
++
++## Exact procedure (no choices remain)
++- Code: `scripts/backtest_prop_holdout_v2.py` at the commit that adds this file, unchanged. Run through `scripts/prereg_v2_market.py --market rebounds --selector edge`.
++- Data:
++  - 2024–25 regular-season pregame features: artifact `v13-2024-player-prop-features`, run 38614413903.
++  - 2024–25 game index with tip times: `games.jsonl` in `v13-full-2024-threes-lines`, run 38614396898.
++  - All 2024–25 two-sided opening props collected by `scripts/collect_season_prop_openings.py`.
++- Line rule: fixed vendor priority; the earliest row opened strictly before tip; rows without both prices are excluded and counted.
++- Split: the pipeline's built-in within-season 65/35 date split. The threshold is chosen on the inner 70/30 split of the training period, from the pipeline's rebounds edge grid [1, 1.5, 2, 2.5], requiring ≥ 40 validation bets, by its built-in rule.
++- Primary endpoint: all rebounds edge-selected bets in the 2024–25 holdout (overs and unders together).
++- Secondary (descriptive only): overs and unders separately.
++
++## Frozen pass rule
++**PASS only if all hold:**
++- ≥ 150 decided bets;
++- ROI at actual prices > 0;
++- excess hit rate ≥ 2.0 pp AND z ≥ 2.0 under both multiplicative and power de-vig;
++- ≥ 90% of matched rows carry two-sided prices.
++
++**Otherwise FAIL** (or UNTESTABLE if price coverage is under 90%).
++
++No other markets, selectors, thresholds, sides, line buckets or vendors may be evaluated as a rescue. A PASS licenses only a pre-registered forward test in 2026–27 at flat 1%. It does not authorize tiered staking.
+diff --git a/scripts/backtest_prop_holdout_v2.py b/scripts/backtest_prop_holdout_v2.py
+index 5ab40ff..0819a94 100644
+--- a/scripts/backtest_prop_holdout_v2.py
++++ b/scripts/backtest_prop_holdout_v2.py
+@@ -162,7 +162,8 @@ def simulate(rows, selector, threshold, pricing, sigma, bankroll=10000.0):
+             ledger.append({"date": r["date"], "game_id": r["game_id"], "player_id": r["player_id"],
+                            "market": r["market"], "vendor": r["vendor"], "opened_at": r["opened_at"],
+                            "line": r["line"], "projection": round(r["projection"], 3), "side": side,
+-                           "price": price, "score": round(score, 4), "market_prob": market_prob,
++                           "price": price, "over_odds": r["over_odds"], "under_odds": r["under_odds"],
++                           "score": round(score, 4), "market_prob": market_prob,
+                            "outcome": outcome, "stake": stake, "pnl": pnl, "bankroll": bankroll,
+                            "drawdown_pct": round(100 * (peak - bankroll) / peak, 3)})
+     return summarize(ledger, skipped)
+diff --git a/scripts/collect_season_prop_openings.py b/scripts/collect_season_prop_openings.py
+new file mode 100644
+index 0000000..0e32ee4
+--- /dev/null
++++ b/scripts/collect_season_prop_openings.py
+@@ -0,0 +1,60 @@
++"""Collect ALL opening player-prop rows (every prop type, two-sided only) for one season's games.
++
++Same endpoint and filters as collect_full_prop_openings.py, but season-agnostic and with a
++manifest of rows per prop type so coverage gaps are visible before any experiment runs.
++
++python -m scripts.collect_season_prop_openings --games games_2024.jsonl --out research_data/props/opening_props_2024.jsonl
++"""
++import argparse, json, os, time
++from collections import Counter
++from pathlib import Path
++
++import requests
++
++URL = "https://api.balldontlie.io/nba/v2/odds/player_props/opening"
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--games", required=True); p.add_argument("--out", required=True)
++    p.add_argument("--min-games", type=int, default=1100)
++    a = p.parse_args()
++    key = os.environ.get("BALLDONTLIE_API_KEY")
++    if not key:
++        raise RuntimeError("BALLDONTLIE_API_KEY not set")
++    games = [json.loads(x) for x in Path(a.games).open() if x.strip()]
++    games = sorted((g for g in games if g.get("status") == "Final" and g.get("postseason") is False),
++                   key=lambda g: (str(g.get("date")), str(g.get("id"))))
++    out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
++    s = requests.Session(); counts = Counter(); by_type = Counter(); games_with_rows = 0
++    with out.open("w") as f:
++        for g in games:
++            for attempt in range(7):
++                r = s.get(URL, params={"game_id": g["id"]}, headers={"Authorization": key}, timeout=60)
++                if r.status_code in (429, 500, 502, 503, 504):
++                    if attempt == 6:
++                        r.raise_for_status()
++                    time.sleep(min(5 * (attempt + 1), 30)); continue
++                r.raise_for_status(); break
++            data = r.json().get("data", [])
++            usable = 0
++            for row in data:
++                if str(row.get("game_id")) != str(g["id"]):
++                    raise RuntimeError("Game ID mismatch")
++                if (row.get("market") or {}).get("type") != "over_under" or not row.get("opened_at") or row.get("line_value") is None:
++                    continue
++                f.write(json.dumps(row, separators=(",", ":")) + "\n")
++                usable += 1; by_type[str(row.get("prop_type"))] += 1
++            counts["games"] += 1; counts["usable_rows"] += usable; games_with_rows += usable > 0
++            if counts["games"] % 100 == 0:
++                print(dict(counts), flush=True)
++            time.sleep(0.06)
++    manifest = {**counts, "games_with_rows": games_with_rows, "rows_by_prop_type": dict(by_type)}
++    (out.parent / (out.stem + "_manifest.json")).write_text(json.dumps(manifest, indent=2) + "\n")
++    print(json.dumps(manifest, indent=2))
++    if counts["games"] < a.min_games:
++        raise RuntimeError(f"Only {counts['games']} final regular-season games in index")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/game_model_v2.py b/scripts/game_model_v2.py
+index ac32f0b..8bc9e15 100644
+--- a/scripts/game_model_v2.py
++++ b/scripts/game_model_v2.py
+@@ -71,7 +71,9 @@ def build_rows(games, stats, odds):
+     for gid, p in proj.items():
+         o = lines.get(gid)
+         if o is None:
+-            coverage["no_pregame_line"] += 1; continue
++            coverage["no_pregame_line"] += 1
++            coverage[f"no_pregame_line_season_{p.get('season')}"] += 1
++            continue
+         if "actual_margin" not in p:
+             coverage["no_result"] += 1; continue
+         for market in ("spread", "total"):
+@@ -174,6 +176,9 @@ def main():
+     rows, coverage = build_rows(games, stats, odds)
+     cands, report = run(rows)
+     report["coverage"] = dict(coverage); report["rows"] = len(rows)
++    report["rows_by_season"] = dict(Counter(str(r.get("season")) for r in rows))
++    report["candidates_by_season"] = dict(Counter(str(c.get("season")) for c in cands))
++    report["games_by_season"] = dict(Counter(str(g.get("season")) for g in games))
+     for path, content in ((a.out_candidates, "".join(json.dumps(c) + "\n" for c in cands)),
+                           (a.out_report, json.dumps(report, indent=2) + "\n")):
+         Path(path).parent.mkdir(parents=True, exist_ok=True); Path(path).write_text(content)
+diff --git a/scripts/log_live_odds.py b/scripts/log_live_odds.py
+index 75c90b9..af384b2 100644
+--- a/scripts/log_live_odds.py
++++ b/scripts/log_live_odds.py
+@@ -53,9 +53,16 @@ def snapshot(key, now=None):
+         for r in paged(s, "/nba/v2/odds", [("game_ids[]", str(x)) for x in ids[i:i + 10]], key):
+             rows.append({"kind": "game_odds", "retrieved_at_utc": stamp, **r})
+     for gid in ids:
+-        payload = get(s, "/nba/v2/odds/player_props", [("game_id", str(gid))], key)
+-        for r in payload.get("data", []):
+-            rows.append({"kind": "player_prop", "retrieved_at_utc": stamp, **r})
++        cursor, seen = None, set()
++        while True:  # follow a cursor if the endpoint ever paginates; never assume one page
++            params = [("game_id", str(gid))] + ([("cursor", str(cursor))] if cursor is not None else [])
++            payload = get(s, "/nba/v2/odds/player_props", params, key)
++            for r in payload.get("data", []):
++                rows.append({"kind": "player_prop", "retrieved_at_utc": stamp, **r})
++            cursor = (payload.get("meta") or {}).get("next_cursor")
++            if cursor is None or str(cursor) in seen:
++                break
++            seen.add(str(cursor))
+         time.sleep(0.1)
+     tips = {str(g["id"]): g.get("datetime") for g in upcoming}
+     for r in rows:
+diff --git a/scripts/odds_coverage_audit.py b/scripts/odds_coverage_audit.py
+new file mode 100644
+index 0000000..79400cb
+--- /dev/null
++++ b/scripts/odds_coverage_audit.py
+@@ -0,0 +1,89 @@
++"""Per-season coverage audit for opening game odds (and optionally props). Diagnosis only.
++
++For each season it separates the possible causes of "no pregame line":
++  games_without_tip_time      the game index lacks 'datetime' (pre-tip check impossible)
++  games_without_any_row       the API returned no opening row for that game
++  games_with_only_post_tip    rows exist but every row opened at/after tip
++  games_with_pregame_row      usable
++and reports opening lead-time quantiles (hours before tip) plus price completeness.
++
++python -m scripts.odds_coverage_audit --season 2023 --games games_2023.jsonl --odds opening_2023.jsonl \
++   --season 2024 --games ... --odds ... --out research_results/coverage/game_odds_coverage.json
++"""
++import argparse, json
++from collections import Counter, defaultdict
++from pathlib import Path
++
++import numpy as np
++
++from v13.pricing import parse_utc, pregame_status, tip_times
++
++
++def read(p):
++    return [json.loads(x) for x in Path(p).open() if x.strip()]
++
++
++def audit_season(games, rows, kind="game"):
++    regular = [g for g in games if g.get("postseason") is False or g.get("postseason") is None]
++    tips = tip_times(regular)
++    ids = {str(g["id"]) for g in regular}
++    by_game = defaultdict(list)
++    foreign = 0
++    for r in rows:
++        gid = str(r.get("game_id"))
++        if gid in ids:
++            by_game[gid].append(r)
++        else:
++            foreign += 1
++    status_games = Counter()
++    leads, row_status = [], Counter()
++    priced = Counter()
++    for gid in ids:
++        rs = by_game.get(gid, [])
++        if gid not in tips:
++            status_games["games_without_tip_time"] += 1
++        if not rs:
++            status_games["games_without_any_row"] += 1
++            continue
++        st = [pregame_status(r.get("opened_at"), tips.get(gid)) for r in rs]
++        row_status.update(st)
++        if "pregame" in st:
++            status_games["games_with_pregame_row"] += 1
++        elif all(s == "post_tip" for s in st):
++            status_games["games_with_only_post_tip"] += 1
++        else:
++            status_games["games_with_only_unverifiable"] += 1
++        for r, s in zip(rs, st):
++            if s == "pregame":
++                leads.append((tips[gid] - parse_utc(r["opened_at"])).total_seconds() / 3600)
++            if kind == "game":
++                priced["rows_with_spread_price"] += r.get("spread_home_odds") is not None and r.get("spread_away_odds") is not None
++                priced["rows_with_total_price"] += r.get("total_over_odds") is not None and r.get("total_under_odds") is not None
++            else:
++                m = r.get("market") or {}
++                priced["rows_with_two_sided_price"] += m.get("over_odds") is not None and m.get("under_odds") is not None
++    q = np.percentile(leads, [5, 25, 50, 75, 95]).round(1).tolist() if leads else None
++    return {"regular_games": len(ids), "rows": len(rows), "rows_for_other_games": foreign,
++            **dict(status_games), "row_status": dict(row_status), **dict(priced),
++            "pregame_lead_hours_p5_p25_p50_p75_p95": q,
++            "vendors": dict(Counter(str(r.get("vendor")) for rs in by_game.values() for r in rs))}
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--season", type=int, action="append", required=True)
++    p.add_argument("--games", action="append", required=True)
++    p.add_argument("--odds", action="append", required=True)
++    p.add_argument("--kind", choices=("game", "prop"), default="game")
++    p.add_argument("--out", required=True)
++    a = p.parse_args()
++    if not len(a.season) == len(a.games) == len(a.odds):
++        raise SystemExit("Give --season/--games/--odds once per season")
++    report = {str(s): audit_season(read(g), read(o), a.kind) for s, g, o in zip(a.season, a.games, a.odds)}
++    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
++    Path(a.out).write_text(json.dumps(report, indent=2) + "\n")
++    print(json.dumps(report, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/prereg_v2_market.py b/scripts/prereg_v2_market.py
+new file mode 100644
+index 0000000..46e1a37
+--- /dev/null
++++ b/scripts/prereg_v2_market.py
+@@ -0,0 +1,82 @@
++"""Frozen procedure replication for one prop market on an untouched season (v2 pipeline).
++
++Runs scripts.backtest_prop_holdout_v2.evaluate EXACTLY as configured in code (within-season
++65/35 split, inner 70/30 validation, EDGE_GRID/EV_GRID, >=40 validation bets, actual prices,
++strict pre-tip lines), takes the named market + selector holdout ledger, and grades it under
++multiplicative AND power de-vig with a mechanical verdict. Nothing is chosen by this script.
++
++python -m scripts.prereg_v2_market --market rebounds --selector edge --features props_2024.jsonl \
++  --lines opening_props_2024.jsonl --games games_2024.jsonl --out research_results/prereg/rebounds_2024.json
++"""
++import argparse, json, math
++from pathlib import Path
++
++from scripts.backtest_prop_holdout_v2 import evaluate
++from v13.pricing import no_vig_pair, power_devig_pair, profit_per_unit, wilson
++
++RULE = {"min_bets": 150, "min_roi_pct": 0.0, "min_excess": 0.02, "min_z": 2.0, "min_priced_share": 0.9}
++
++
++def read(p):
++    return [json.loads(x) for x in Path(p).open() if x.strip()]
++
++
++def grade(ledger):
++    d = [b for b in ledger if b["outcome"] in ("win", "loss")]
++    n = len(d); w = sum(b["outcome"] == "win" for b in d)
++    out = {"bets": len(ledger), "decided": n, "wins": w, "losses": n - w, "pushes": len(ledger) - n,
++           "hit_rate": round(w / n, 4) if n else None, "hit_95ci": wilson(w, n)}
++    if not n:
++        return out
++    out["roi_actual_price_pct"] = round(100 * sum(profit_per_unit(b["price"]) if b["outcome"] == "win" else -1
++                                                  for b in d) / n, 2)
++    for name, fn in (("multiplicative", no_vig_pair), ("power", power_devig_pair)):
++        ps = [fn(b["over_odds"], b["under_odds"])[0 if b["side"] == "over" else 1] for b in d]
++        exp, var = sum(ps), sum(p * (1 - p) for p in ps)
++        out[name] = {"expected_hit_rate": round(exp / n, 4), "excess": round((w - exp) / n, 4),
++                     "z": round((w - exp) / math.sqrt(var), 2) if var > 0 else None}
++    return out
++
++
++def run(features, lines, games, market, selector):
++    rep = evaluate(features, lines, games, "actual")
++    m = rep["markets"].get(market) or {}
++    if m.get("status") != "evaluated" or not isinstance(m.get(selector), dict) or "holdout_ledger" not in m[selector]:
++        return {"verdict": "UNTESTABLE", "reason": f"pipeline did not evaluate {market}/{selector}", "detail": m,
++                "coverage": rep.get("coverage")}
++    ledger = m[selector]["holdout_ledger"]
++    cov = rep.get("coverage", {})
++    dropped = cov.get("line_post_tip", 0) + cov.get("line_unverifiable", 0)
++    priced_share = rep.get("rows_with_both_prices", 0) / max(1, rep.get("matched_rows", 0))
++    primary = grade(ledger)
++    checks = {
++        "bets_ge_150": primary["decided"] >= RULE["min_bets"],
++        "roi_gt_0": (primary.get("roi_actual_price_pct") is not None and primary["roi_actual_price_pct"] > RULE["min_roi_pct"]),
++        "excess_ge_2pts_multiplicative": (primary.get("multiplicative") or {}).get("excess", -1) >= RULE["min_excess"],
++        "excess_ge_2pts_power": (primary.get("power") or {}).get("excess", -1) >= RULE["min_excess"],
++        "z_ge_2_multiplicative": ((primary.get("multiplicative") or {}).get("z") or -9) >= RULE["min_z"],
++        "z_ge_2_power": ((primary.get("power") or {}).get("z") or -9) >= RULE["min_z"],
++    }
++    verdict = "UNTESTABLE" if priced_share < RULE["min_priced_share"] else ("PASS" if all(checks.values()) else "FAIL")
++    return {"verdict": verdict, "market": market, "selector": selector, "rule": RULE, "checks": checks,
++            "frozen_threshold": m[selector]["threshold"], "holdout_start": rep.get("holdout_start"),
++            "priced_share": round(priced_share, 4), "lines_dropped_not_pregame": dropped, "coverage": cov,
++            "primary": primary,
++            "secondary_by_side": {s: grade([b for b in ledger if b["side"] == s]) for s in ("over", "under")},
++            "validation_block": m[selector]["validation"]}
++
++
++def main():
++    p = argparse.ArgumentParser()
++    for k in ("market", "selector", "features", "lines", "games", "out"):
++        p.add_argument(f"--{k}", required=True)
++    a = p.parse_args()
++    res = run(read(a.features), read(a.lines), read(a.games), a.market, a.selector)
++    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
++    Path(a.out).write_text(json.dumps(res, indent=2) + "\n")
++    print(json.dumps(res, indent=2))
++    print(f"VERDICT: {res['verdict']}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/rank_and_stake.py b/scripts/rank_and_stake.py
+index 60eff39..2065269 100644
+--- a/scripts/rank_and_stake.py
++++ b/scripts/rank_and_stake.py
+@@ -64,7 +64,13 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
+         val = [c for c in scored if c.get("season") == validation_season]
+         test = [c for c in scored if c.get("season") == test_season]
+     if not val or not test:
+-        raise RuntimeError(f"Need scored candidates in both seasons (validation {len(val)}, test {len(test)})")
++        # Never relabel seasons or borrow test months: report the gap and stop cleanly.
++        return {"status": "UNTESTABLE", "grouping": grouping,
++                "reason": f"no scored candidates in the {'validation' if not val else 'test'} window",
++                "validation_season": validation_season, "test_season": test_season, "split_date": split_date,
++                "raw_candidates_by_season": dict(Counter(str(c.get("season")) for c in candidates)),
++                "scored_candidates_by_season": dict(Counter(str(c.get("season")) for c in scored)),
++                "scored_validation": len(val), "scored_test": len(test)}
+     scale = 1.0
+     if split_date:
+         days = lambda rows: len({c["date"] for c in rows})
+@@ -113,6 +119,10 @@ def main():
+                  grouping=a.grouping)
+     out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
+     out.write_text(json.dumps(report, indent=2, default=str) + "\n")
++    if report.get("status") == "UNTESTABLE":
++        print(json.dumps(report, indent=2))
++        print("STATUS: UNTESTABLE (no relabelling; see reason)")
++        return
+     brief = {k: v for k, v in report.items() if k != "sweep"}
+     brief["sweep"] = {n: {"cutoff": s["ev_lo_cutoff_from_validation"], "validation_count": s["validation_count"],
+                           **{k: {kk: vv for kk, vv in s["test"][k].items() if kk not in ("by_tier", "by_market")}
+diff --git a/tests/test_round7.py b/tests/test_round7.py
+new file mode 100644
+index 0000000..9013991
+--- /dev/null
++++ b/tests/test_round7.py
+@@ -0,0 +1,36 @@
++from scripts.odds_coverage_audit import audit_season
++from scripts.rank_and_stake import run as rank_run
++
++
++def test_coverage_audit_separates_causes():
++    games = [{"id": 1, "datetime": "2025-01-02T00:00:00Z", "postseason": False},
++             {"id": 2, "datetime": "2025-01-03T00:00:00Z", "postseason": False},
++             {"id": 3, "postseason": False},  # no tip time
++             {"id": 4, "datetime": "2025-01-05T00:00:00Z", "postseason": False}]
++    rows = [{"game_id": 1, "opened_at": "2025-01-01T12:00:00Z", "spread_home_odds": -110, "spread_away_odds": -110,
++             "total_over_odds": -110, "total_under_odds": -110, "vendor": "dk"},
++            {"game_id": 2, "opened_at": "2025-01-03T01:00:00Z", "vendor": "dk"},
++            {"game_id": 3, "opened_at": "2025-01-03T12:00:00Z", "vendor": "dk"}]
++    r = audit_season(games, rows)
++    assert r["games_with_pregame_row"] == 1 and r["games_with_only_post_tip"] == 1
++    assert r["games_without_tip_time"] == 1 and r["games_with_only_unverifiable"] == 1
++    assert r["games_without_any_row"] == 1 and r["rows_with_spread_price"] == 1
++
++
++def test_ranking_reports_untestable_instead_of_crashing_or_relabelling():
++    cands = [{"candidate_id": str(i), "season": 2025, "date": f"2026-0{1 + i % 5}-{1 + i % 27:02d}", "game_id": str(i),
++              "player_id": None, "market": "spread", "side": "home", "line": -3.5, "price": -110, "opp_price": -110,
++              "p_model": 0.5, "outcome": "win" if i % 2 else "loss", "model_version": "residual_v2"} for i in range(600)]
++    rep = rank_run(cands, validation_season=2024, test_season=2025)
++    assert rep["status"] == "UNTESTABLE" and rep["scored_validation"] == 0
++    assert rep["raw_candidates_by_season"] == {"2025": 600}
++
++
++def test_prereg_v2_market_verdict_on_fair_market():
++    from tests.test_pricing_and_v2 import synthetic_season
++    from scripts.prereg_v2_market import run
++    feats, lines, games = synthetic_season(8, priced=True)
++    out = run(feats, lines, games, "threes", "edge")
++    assert out["verdict"] in ("FAIL", "UNTESTABLE")
++    if out["verdict"] == "FAIL":
++        assert "power" in out["primary"] and out["priced_share"] >= 0.9
+-- 
+2.43.0
+

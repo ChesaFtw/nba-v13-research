@@ -1,0 +1,70 @@
+name: V13 Round 9 acceptance — quarantine, logger provenance, ledger separation
+on:
+  workflow_dispatch:
+  push:
+    paths: ['experiments/round9-acceptance.trigger']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SEASON_RUN: '38642028905'
+      PROPS_2025_RUN: '38602363379'
+      THREES_2024_RUN: '38614396898'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Unit and regression tests
+        run: python -m pytest -q
+      - name: Offline end-to-end acceptance (synthetic fixtures)
+        run: python -u -m scripts.acceptance_round9 --out research_results/round9/acceptance.json
+      - name: Download saved real data (no API calls)
+        run: |
+          for s in 2023 2024 2025; do gh run download "$SEASON_RUN" -n v13-r3-season-$s -D research_data; done
+          gh run download "$PROPS_2025_RUN" -n v13-full-opening-props-2025 -D in/props2025
+          gh run download "$THREES_2024_RUN" -n v13-full-2024-threes-lines -D in/threes2024
+      - name: Quarantine REAL historical odds (expect 2023-24/2024-25 rejected, 2025-26 mostly eligible)
+        run: |
+          for s in 2023 2024 2025; do
+            python -u -m scripts.quarantine_odds --source bdl_opening_game_odds \
+              --games research_data/game_history/games_$s.jsonl --odds research_data/game_odds/opening_$s.jsonl \
+              --out research_results/round9/quarantine/game_odds_$s
+          done
+          python -u -m scripts.quarantine_odds --source bdl_opening_player_props \
+            --games research_data/game_history/games_2025.jsonl \
+            --odds "$(find in/props2025 -name 'opening_props_2025.jsonl' | head -1)" --out research_results/round9/quarantine/props_2025
+          python -u -m scripts.quarantine_odds --source bdl_opening_player_props \
+            --games "$(find in/threes2024 -name games.jsonl | head -1)" \
+            --odds "$(find in/threes2024 -name opening_threes.jsonl | head -1)" --out research_results/round9/quarantine/threes_2024
+      - name: Assert real-data gate outcomes
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          q = pathlib.Path("research_results/round9/quarantine")
+          s = {p.parent.name: json.loads(p.read_text()) for p in q.glob("*/summary.json")}
+          for k, v in sorted(s.items()):
+              print(k, v["rows"], "eligible:", v["eligible"], v["reasons"])
+          assert s["game_odds_2023"]["eligible"] == 0, "2023-24 game odds must be fully quarantined"
+          assert s["game_odds_2024"]["eligible"] == 0, "2024-25 game odds must be fully quarantined"
+          assert s["threes_2024"]["eligible"] == 0, "2024-25 props are outside documented coverage"
+          assert s["props_2025"]["eligible"] > 0 and s["game_odds_2025"]["eligible"] > 0
+          for k in ("props_2025", "game_odds_2025"):
+              assert s[k]["eligible"] + s[k]["excluded"] == s[k]["rows"]
+          print("REAL-DATA GATE: PASS")
+          PY
+      - name: Keep summaries (not the large eligible/excluded files)
+        if: always()
+        run: find research_results/round9/quarantine -name '*.jsonl' -delete || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-round9-acceptance
+          path: research_results/round9/
+          retention-days: 90

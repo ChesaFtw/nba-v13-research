@@ -1,0 +1,83 @@
+name: V13 R14 — threes and rebounds (tracking audit + pre-registered tests)
+on:
+  workflow_dispatch:
+  push:
+    paths: ['experiments/r14-research.trigger']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  collect-tracking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        season: [2023, 2024, 2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Collect and audit /nba/v2/stats/advanced
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.collect_tracking --season ${{ matrix.season }} --out research_data/tracking
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-r14-tracking-${{ matrix.season }}
+          path: research_data/tracking/
+          retention-days: 90
+          if-no-files-found: warn
+  r14:
+    needs: collect-tracking
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SEASON_RUN: '38642028905'
+      PROPS_2025_RUN: '38602363379'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Refuse to run unless the pre-registration is committed
+        run: test -f PREREG_R14_THREES_REBOUNDS.md && git log --oneline -1 -- PREREG_R14_THREES_REBOUNDS.md
+      - name: Inputs (saved artifacts)
+        run: |
+          for s in 2023 2024 2025; do gh run download "$SEASON_RUN" -n v13-r3-season-$s -D research_data; done
+          gh run download "$PROPS_2025_RUN" -n v13-full-opening-props-2025 -D in/props2025
+          RUN24=$(gh run list --workflow prereg-rebounds-2024.yml --status success --limit 1 --json databaseId -q '.[0].databaseId')
+          echo "2024-25 props run: $RUN24"
+          if [ -n "$RUN24" ]; then gh run download "$RUN24" -n v13-prereg-rebounds-2024 -D in/props2024 || true; fi
+          for s in 2023 2024 2025; do gh run download "${{ github.run_id }}" -n v13-r14-tracking-$s -D in/tracking || true; done
+          ls -R in | head -50
+      - name: Provenance gate (2025-26)
+        run: |
+          python -u -m scripts.quarantine_odds --source bdl_opening_player_props --games research_data/game_history/games_2025.jsonl \
+            --odds "$(find in/props2025 -name opening_props_2025.jsonl | head -1)" --out gated/props_2025
+      - name: Frozen R14 run
+        run: |
+          mkdir -p research_results/r14
+          P24=$(find in/props2024 -name opening_props_2024.jsonl 2>/dev/null | head -1)
+          TRK=""; for f in $(find in/tracking -name 'tracking_*.jsonl' 2>/dev/null); do TRK="$TRK --tracking $f"; done
+          for f in $(find in/tracking -name 'manifest_*.json' 2>/dev/null); do TRK="$TRK --tracking-manifest $f"; cp "$f" research_results/r14/; done
+          python -u -m scripts.r14_research --props gated/props_2025/eligible.jsonl \
+            $( [ -n "$P24" ] && echo --props-2024 "$P24" ) $TRK \
+            $(for s in 2023 2024 2025; do echo --stats research_data/regular_player_history/player_stats_regular_$s.jsonl \
+              --games research_data/game_history/games_$s.jsonl; done) \
+            --out research_results/r14/r14_results.json
+          cp gated/props_2025/summary.json research_results/r14/gate_props_2025.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-r14-results
+          path: research_results/r14/
+          retention-days: 90

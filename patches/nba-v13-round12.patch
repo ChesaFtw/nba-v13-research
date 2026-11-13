@@ -1,0 +1,566 @@
+From 69a231d14942c2447c6e9c380ca83a31087940ef Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 21:24:06 -0500
+Subject: [PATCH] Round 12: pre-registered sportsbook-disagreement test (price
+ and line outliers) and official injury-report feasibility probe
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ PREREG_R12_BOOK_DISAGREEMENT.md |  39 ++++++
+ scripts/book_disagreement.py    | 221 ++++++++++++++++++++++++++++++++
+ scripts/injury_report_probe.py  | 143 +++++++++++++++++++++
+ tests/test_round12.py           | 117 +++++++++++++++++
+ 4 files changed, 520 insertions(+)
+ create mode 100644 PREREG_R12_BOOK_DISAGREEMENT.md
+ create mode 100644 scripts/book_disagreement.py
+ create mode 100644 scripts/injury_report_probe.py
+ create mode 100644 tests/test_round12.py
+
+diff --git a/PREREG_R12_BOOK_DISAGREEMENT.md b/PREREG_R12_BOOK_DISAGREEMENT.md
+new file mode 100644
+index 0000000..c62db0d
+--- /dev/null
++++ b/PREREG_R12_BOOK_DISAGREEMENT.md
+@@ -0,0 +1,39 @@
++# Pre-registration — R12 sportsbook disagreement (2025-26 gated opening props)
++
++Frozen before any result is seen. Code: `scripts/book_disagreement.py` (constants in `FROZEN`).
++
++## Question
++When one sportsbook's opening prop disagrees with the other books, does betting against that book beat its own price?
++No projection of ours is used: the other books are the model.
++
++## Data
++- 2025-26 opening player props, provenance-gated (`odds-gate-1`). The script fails closed on ungated rows. 2023-24 and 2024-25 stay quarantined.
++- Markets: points, rebounds, assists, threes, PRA. Over/under only; both prices required.
++- One quote per book per player-game-market: that book's earliest gated row.
++- Outcome from the regular-season box score. No box score = DNP, void. Pushes are excluded from ROI.
++
++## Hypotheses (both frozen; each must pass on its own)
++**H12a — price outlier at the same line.**
++- Comparison books: those quoting the same line, opened within 60 minutes of the outlier book's quote; at least 2 required. At least 3 books must quote the player-market.
++- Fair P(over) = mean of the comparison books' power-de-vigged P(over).
++- Bet the side whose expected value at the outlier book's actual price is ≥ +3%.
++- One bet per player-game-market (largest EV; ties broken by fixed vendor priority).
++
++**H12b — line outlier.**
++- The book's line differs by ≥ 1.0 from the median line of the other books that opened within 60 minutes (at least 2 required).
++- Bet the side that book made easier (over a lower line, under a higher line), only if that side is priced −150 or better.
++- One bet per player-game-market (largest gap).
++
++## PASS (all, per hypothesis)
++- ≥ 300 decided bets;
++- ROI > 0 at actual prices;
++- z ≥ 2.5 for hit rate vs the outlier book's own de-vigged probability, under both multiplicative and power de-vig;
++- game-cluster bootstrap 95% CI lower bound on ROI > 0.
++
++## Descriptive only (cannot rescue a FAIL)
++By market, side, outlier vendor, and posting hour (US Central). Also excess vs the consensus probability: we expect it near zero if the consensus is right.
++
++## What a PASS does and doesn't mean
++- A PASS means the opening outlier prices were beatable. It doesn't show that a once-a-day bettor could get them. We only see opening quotes, and an outlier may be corrected within minutes.
++- A PASS licenses exactly one next step: a frozen 2026-27 shadow test run from a once-daily scheduled scan, graded on prices actually observed by the live logger at scan time.
++- A FAIL retires both rules. No changes to thresholds, windows, markets or vendors after seeing results.
+diff --git a/scripts/book_disagreement.py b/scripts/book_disagreement.py
+new file mode 100644
+index 0000000..28aa286
+--- /dev/null
++++ b/scripts/book_disagreement.py
+@@ -0,0 +1,221 @@
++"""R12 (pre-registered in PREREG_R12_BOOK_DISAGREEMENT.md): when one sportsbook's opening prop
++disagrees with the other books, does betting against that book beat its price?
++
++No projection of our own is used. The other books are the model.
++
++H12a PRICE OUTLIER (same line). For a book v, the "others" are books quoting the SAME line for the
++same player-game-market whose opening timestamp is within WINDOW_MIN of v's (so the comparison is
++roughly simultaneous). Fair P(over) = mean of the others' power-de-vigged P(over). The bet is the
++side of v whose expected value at v's actual price is >= MIN_EV under that fair probability.
++H12b LINE OUTLIER. v's line differs from the median line of the in-window others by >= MIN_LINE_GAP.
++Bet the side v made easier (over if v's line is lower, under if higher), only if that side's price
++is no worse than MAX_JUICE.
++
++One bet per player-game-market per hypothesis (the largest EV / largest gap; ties by vendor
++priority). DNP props are void (no box score); pushes are excluded from ROI. Inputs must be
++provenance-gated. Frozen constants below; nothing is tuned here.
++"""
++import argparse, json, math, statistics
++from collections import Counter, defaultdict
++from datetime import timedelta
++from pathlib import Path
++
++import numpy as np
++
++from scripts.backtest_prop_holdout import ALIASES, VENDORS
++from v13.pricing import parse_utc, power_devig_pair, no_vig_pair, profit_per_unit, prop_prices, wilson
++from v13.provenance import require_eligible
++
++FROZEN = {"markets": ("points", "rebounds", "assists", "threes", "pra"), "min_books": 3, "min_others": 2,
++          "window_min": 60, "min_ev": 0.03, "min_line_gap": 1.0, "max_juice": -150,
++          "pass": {"min_bets": 300, "min_roi_pct": 0.0, "min_z": 2.5, "min_cluster_ci_low_pct": 0.0}}
++STAT = {"points": ("pts",), "rebounds": ("reb",), "assists": ("ast",), "threes": ("fg3m",), "pra": ("pts", "reb", "ast")}
++CENTRAL = timedelta(hours=-5)  # descriptive only: hour the outlier price was posted, US Central (CDT/CST approx.)
++
++
++def read(p):
++    return [json.loads(x) for x in Path(p).open() if x.strip()]
++
++
++def vrank(v):
++    return VENDORS.index(v) if v in VENDORS else 99
++
++
++def opening_quotes(props):
++    """(game, player, market) -> {vendor: quote}; the earliest gated two-sided row per vendor."""
++    best = {}
++    for r in props:
++        m = ALIASES.get(r.get("prop_type"))
++        if m not in FROZEN["markets"] or (r.get("market") or {}).get("type") != "over_under":
++            continue
++        over, under = prop_prices(r)
++        if over is None or under is None or r.get("line_value") is None or not r.get("opened_at"):
++            continue
++        v = str(r.get("vendor") or "").lower()
++        key = (str(r["game_id"]), str(r["player_id"]), m, v)
++        t = parse_utc(r["opened_at"])
++        if key not in best or t < best[key]["t"]:
++            best[key] = {"vendor": v, "line": float(r["line_value"]), "over": over, "under": under, "t": t,
++                         "p_over": power_devig_pair(over, under)[0]}
++    groups = defaultdict(dict)
++    for (g, p, m, v), q in best.items():
++        groups[(g, p, m)][v] = q
++    return groups
++
++
++def in_window(a, b):
++    return abs((a["t"] - b["t"]).total_seconds()) <= FROZEN["window_min"] * 60
++
++
++def pick_bets(groups):
++    price_bets, line_bets, seen = [], [], Counter()
++    for (gid, pid, m), books in groups.items():
++        seen["groups"] += 1
++        if len(books) < FROZEN["min_books"]:
++            seen["fewer_than_3_books"] += 1; continue
++        seen["groups_ge_3_books"] += 1
++        best_price, best_line = None, None
++        for v, q in books.items():
++            near = [o for w, o in books.items() if w != v and in_window(q, o)]
++            same = [o for o in near if abs(o["line"] - q["line"]) < 1e-9]
++            if len(same) >= FROZEN["min_others"]:
++                fair_over = sum(o["p_over"] for o in same) / len(same)
++                for side, fair, price in (("over", fair_over, q["over"]), ("under", 1 - fair_over, q["under"])):
++                    ev = fair * (1 + profit_per_unit(price)) - 1
++                    if ev >= FROZEN["min_ev"]:
++                        cand = (ev, -vrank(v), {"vendor": v, "side": side, "line": q["line"], "price": price,
++                                                "opp_price": q["under"] if side == "over" else q["over"],
++                                                "fair": fair, "ev": ev, "others": len(same), "t": q["t"]})
++                        if best_price is None or cand[:2] > best_price[:2]:
++                            best_price = cand
++            if len(near) >= FROZEN["min_others"]:
++                med = statistics.median(o["line"] for o in near)
++                gap = med - q["line"]
++                if abs(gap) >= FROZEN["min_line_gap"]:
++                    side = "over" if gap > 0 else "under"
++                    price = q["over"] if side == "over" else q["under"]
++                    if price is not None and (price > 0 or price >= FROZEN["max_juice"]):
++                        cand = (abs(gap), -vrank(v), {"vendor": v, "side": side, "line": q["line"], "price": price,
++                                                      "opp_price": q["under"] if side == "over" else q["over"],
++                                                      "gap": gap, "others": len(near), "t": q["t"]})
++                        if best_line is None or cand[:2] > best_line[:2]:
++                            best_line = cand
++        for best, out in ((best_price, price_bets), (best_line, line_bets)):
++            if best:
++                out.append({"game_id": gid, "player_id": pid, "market": m, **best[2]})
++    return price_bets, line_bets, seen
++
++
++def settle(bets, stats):
++    box = {}
++    for r in stats:
++        g, pl = r.get("game") or {}, r.get("player") or {}
++        if g.get("id") is not None and pl.get("id") is not None:
++            box[(str(g["id"]), str(pl["id"]))] = r
++    out, skipped = [], Counter()
++    for b in bets:
++        r = box.get((b["game_id"], b["player_id"]))
++        if r is None:
++            skipped["no_box_score_void"] += 1; continue
++        actual = sum(float(r.get(f) or 0) for f in STAT[b["market"]])
++        d = actual - b["line"]
++        if abs(d) < 1e-9:
++            outcome = "push"
++        else:
++            outcome = "win" if (d > 0) == (b["side"] == "over") else "loss"
++        p_mult = no_vig_pair(b["price"], b["opp_price"])[0]
++        p_pow = power_devig_pair(b["price"], b["opp_price"])[0]
++        out.append({**b, "actual": actual, "outcome": outcome, "p_mult": p_mult, "p_power": p_pow,
++                    "hour_central": (b["t"] + CENTRAL).hour, "t": b["t"].isoformat()})
++    return out, skipped
++
++
++def grade(rows, reps=2000, seed=12):
++    d = [r for r in rows if r["outcome"] in ("win", "loss")]
++    n = len(d); w = sum(r["outcome"] == "win" for r in d)
++    out = {"bets": len(rows), "decided": n, "wins": w, "hit_rate": round(w / n, 4) if n else None, "hit_95ci": wilson(w, n)}
++    if not n:
++        return out
++    pnl = [profit_per_unit(r["price"]) if r["outcome"] == "win" else -1.0 for r in d]
++    out["roi_pct"] = round(100 * sum(pnl) / n, 2)
++    out["avg_breakeven"] = round(sum(1 / (1 + profit_per_unit(r["price"])) for r in d) / n, 4)
++    for name, key in (("vs_own_book_multiplicative", "p_mult"), ("vs_own_book_power", "p_power")):
++        exp = sum(r[key] for r in d); var = sum(r[key] * (1 - r[key]) for r in d)
++        out[name] = {"expected": round(exp / n, 4), "excess": round((w - exp) / n, 4),
++                     "z": round((w - exp) / math.sqrt(var), 2) if var else None}
++    if all("fair" in r for r in d):
++        exp = sum(r["fair"] for r in d); var = sum(r["fair"] * (1 - r["fair"]) for r in d)
++        out["vs_consensus"] = {"expected": round(exp / n, 4), "excess": round((w - exp) / n, 4),
++                               "z": round((w - exp) / math.sqrt(var), 2) if var else None}
++    by = defaultdict(list)
++    for r, p in zip(d, pnl):
++        by[r["game_id"]].append(p)
++    groups = list(by.values())
++    if len(groups) >= 10:
++        rng = np.random.default_rng(seed)
++        boots = []
++        for _ in range(reps):
++            pick = rng.integers(0, len(groups), len(groups))
++            tot = sum(sum(groups[i]) for i in pick); cnt = sum(len(groups[i]) for i in pick)
++            boots.append(100 * tot / cnt)
++        out["game_cluster_roi_95ci_pct"] = [round(float(np.percentile(boots, 2.5)), 2), round(float(np.percentile(boots, 97.5)), 2)]
++        out["games"] = len(groups)
++    return out
++
++
++def checks(g):
++    P = FROZEN["pass"]
++    return {"decided_ge_300": g["decided"] >= P["min_bets"],
++            "roi_gt_0": (g.get("roi_pct") if g.get("roi_pct") is not None else -1) > P["min_roi_pct"],
++            "z_ge_2.5_vs_own_book_multiplicative": ((g.get("vs_own_book_multiplicative") or {}).get("z") or -9) >= P["min_z"],
++            "z_ge_2.5_vs_own_book_power": ((g.get("vs_own_book_power") or {}).get("z") or -9) >= P["min_z"],
++            "game_cluster_ci_low_gt_0": (g.get("game_cluster_roi_95ci_pct") or [-1])[0] > P["min_cluster_ci_low_pct"]}
++
++
++def run(props, stats, validated=True):
++    if validated:
++        require_eligible(props, "R12 book disagreement")
++    groups = opening_quotes(props)
++    vendors = Counter(v for books in groups.values() for v in books)
++    books_per_group = Counter(min(len(b), 6) for b in groups.values())
++    pb, lb, seen = pick_bets(groups)
++    res = {"hypotheses": {}}
++    for name, bets in (("H12a_price_outlier", pb), ("H12b_line_outlier", lb)):
++        rows, skipped = settle(bets, stats)
++        g = grade(rows)
++        c = checks(g)
++        res["hypotheses"][name] = {
++            "verdict": "PASS" if all(c.values()) else "FAIL", "checks": c, "primary": g, "skipped": dict(skipped),
++            "descriptive_by_market": {m: grade([r for r in rows if r["market"] == m]) for m in FROZEN["markets"]},
++            "descriptive_by_side": {s: grade([r for r in rows if r["side"] == s]) for s in ("over", "under")},
++            "descriptive_by_outlier_vendor": {v: grade([r for r in rows if r["vendor"] == v]) for v in sorted({r["vendor"] for r in rows})},
++            "descriptive_by_posted_hour_central": {h: len([r for r in rows if r["hour_central"] == h]) for h in range(24)},
++            "sample": rows[:25]}
++    res.update({"frozen": FROZEN, "evidence_class": "validated" if validated else "exploratory_unverified_prices",
++                "coverage": {"vendors_quoting": dict(vendors), "books_per_player_market": dict(sorted(books_per_group.items())),
++                             **dict(seen)},
++                "limitations": ["Opening quotes only: we do not observe whether the outlier price was still available "
++                                "later in the day. The 60-minute window limits, but does not remove, that risk.",
++                                "Only the live logger (simultaneous snapshots) can confirm a daily-check bettor could get these prices.",
++                                "A PASS licenses only a frozen 2026-27 shadow test; it is not yet a betting rule."]})
++    return res
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--props", required=True)
++    p.add_argument("--stats", action="append", required=True)
++    p.add_argument("--out", required=True)
++    a = p.parse_args()
++    res = run(read(a.props), [s for f in a.stats for s in read(f)])
++    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
++    Path(a.out).write_text(json.dumps(res, indent=2, default=str) + "\n")
++    for name, h in res["hypotheses"].items():
++        g = h["primary"]
++        print(name, h["verdict"], "decided", g["decided"], "hit", g.get("hit_rate"), "roi%", g.get("roi_pct"),
++              "ci", g.get("game_cluster_roi_95ci_pct"))
++    print(json.dumps(res["coverage"], indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/injury_report_probe.py b/scripts/injury_report_probe.py
+new file mode 100644
+index 0000000..991f714
+--- /dev/null
++++ b/scripts/injury_report_probe.py
+@@ -0,0 +1,143 @@
++"""R12 probe: can we collect the official NBA injury reports for 2025-26 with trustworthy timestamps?
++
++This is a feasibility probe, not an experiment. It answers four questions before any collector is built:
++  1. Does the official index page list the season's report PDFs, and how many?
++  2. What filename/time format do they use (hourly "_05PM" or 15-minute "_05_30PM")?
++  3. Do the PDFs download, and what do their Last-Modified headers say vs the filename time?
++  4. Can the text be extracted well enough to parse (player, team, game, status)?
++It saves raw text for a spread of sample reports so the parser is written against the real layout.
++
++Publication time comes from the filename (US Eastern). That is the timestamp the H3 design relies on.
++"""
++import argparse, json, re
++from datetime import datetime, timezone
++from pathlib import Path
++from zoneinfo import ZoneInfo
++
++INDEX_URLS = ("https://official.nba.com/nba-injury-report-2025-26-season/",)
++PDF_BASE = "https://ak-static.cms.nba.com/referee/injury/"
++LINK_RE = re.compile(r"https?://[^\"'\s>]*Injury-Report_\d{4}-\d{2}-\d{2}_[0-9_]+[AP]M\.pdf", re.I)
++NAME_RE = re.compile(r"Injury-Report_(\d{4}-\d{2}-\d{2})_(\d{1,2})(?:_(\d{2}))?([AP]M)\.pdf$", re.I)
++ET = ZoneInfo("America/New_York")
++HEADERS = {"User-Agent": "Mozilla/5.0 (research probe; contact via repository)"}
++
++
++def extract_links(html):
++    return sorted(set(LINK_RE.findall(html or "")))
++
++
++def report_time(url):
++    """Filename time -> (eastern_iso, utc_iso, format) or None."""
++    m = NAME_RE.search(url)
++    if not m:
++        return None
++    day, hh, mm, ampm = m.group(1), int(m.group(2)), int(m.group(3) or 0), m.group(4).upper()
++    hh = hh % 12 + (12 if ampm == "PM" else 0)
++    et = datetime.fromisoformat(f"{day}T{hh:02d}:{mm:02d}:00").replace(tzinfo=ET)
++    return {"eastern": et.isoformat(), "utc": et.astimezone(timezone.utc).isoformat(),
++            "format": "quarter_hour" if m.group(3) else "hourly"}
++
++
++def candidate_urls(day):
++    """Fallback if the index page is unavailable: both known filename styles for one date."""
++    out = []
++    for h in range(1, 13):
++        for ampm in ("AM", "PM"):
++            out.append(f"{PDF_BASE}Injury-Report_{day}_{h:02d}{ampm}.pdf")
++            for mm in ("00", "15", "30", "45"):
++                out.append(f"{PDF_BASE}Injury-Report_{day}_{h:02d}_{mm}{ampm}.pdf")
++    return out
++
++
++def spread_sample(items, k):
++    if len(items) <= k:
++        return list(items)
++    step = (len(items) - 1) / (k - 1)
++    return [items[round(i * step)] for i in range(k)]
++
++
++def pdf_text(data):
++    try:
++        from io import BytesIO
++        from pypdf import PdfReader
++    except ImportError:
++        return None, "pypdf_not_installed"
++    try:
++        reader = PdfReader(BytesIO(data))
++        return "\n".join((p.extract_text() or "") for p in reader.pages), None
++    except Exception as e:  # report, do not crash the probe
++        return None, f"extract_error: {type(e).__name__}: {e}"
++
++
++def text_stats(text):
++    lines = [x for x in (text or "").splitlines() if x.strip()]
++    return {"lines": len(lines), "status_mentions": dict((s, len(re.findall(rf"\b{s}\b", text or "")))
++                                                        for s in ("Out", "Questionable", "Doubtful", "Probable", "Available")),
++            "first_lines": lines[:60]}
++
++
++def main():
++    import requests
++    p = argparse.ArgumentParser()
++    p.add_argument("--out", required=True)
++    p.add_argument("--sample", type=int, default=20)
++    p.add_argument("--fallback-dates", nargs="*", default=["2025-11-05", "2025-12-22", "2026-01-20", "2026-02-25", "2026-03-30"])
++    a = p.parse_args()
++    out = Path(a.out); (out / "text").mkdir(parents=True, exist_ok=True)
++    summary = {"index": {}, "links": 0, "formats": {}, "samples": [], "fallback": {}}
++    links = []
++    for u in INDEX_URLS:
++        try:
++            r = requests.get(u, headers=HEADERS, timeout=30)
++            found = extract_links(r.text)
++            summary["index"][u] = {"status": r.status_code, "links": len(found)}
++            links += found
++        except Exception as e:
++            summary["index"][u] = {"error": f"{type(e).__name__}: {e}"}
++    links = sorted(set(links), key=lambda x: (report_time(x) or {}).get("utc", x))
++    summary["links"] = len(links)
++    times = [report_time(x) for x in links]
++    summary["formats"] = {f: sum(1 for t in times if t and t["format"] == f) for f in ("hourly", "quarter_hour")}
++    if times and times[0]:
++        summary["first_report"], summary["last_report"] = times[0]["eastern"], times[-1]["eastern"]
++    if not links:
++        for day in a.fallback_dates:
++            hits = []
++            for u in candidate_urls(day):
++                try:
++                    if requests.head(u, headers=HEADERS, timeout=15).status_code == 200:
++                        hits.append(u)
++                except Exception:
++                    pass
++            summary["fallback"][day] = hits
++            links += hits
++    for u in spread_sample(links, a.sample):
++        rec = {"url": u, "filename_time": report_time(u)}
++        try:
++            r = requests.get(u, headers=HEADERS, timeout=60)
++            rec.update({"status": r.status_code, "bytes": len(r.content), "last_modified": r.headers.get("Last-Modified"),
++                        "content_type": r.headers.get("Content-Type")})
++            if r.status_code == 200:
++                text, err = pdf_text(r.content)
++                rec["extract_error"] = err
++                if text is not None:
++                    st = text_stats(text)
++                    rec.update({"lines": st["lines"], "status_mentions": st["status_mentions"]})
++                    name = u.rsplit("/", 1)[-1].replace(".pdf", ".txt")
++                    (out / "text" / name).write_text(text)
++                    rec["first_lines"] = st["first_lines"]
++        except Exception as e:
++            rec["error"] = f"{type(e).__name__}: {e}"
++        summary["samples"].append(rec)
++    ok = [s for s in summary["samples"] if s.get("status") == 200 and s.get("lines")]
++    summary["verdict"] = {"reports_listed": len(links), "samples_downloaded_and_parsed": len(ok),
++                          "feasible": bool(links) and len(ok) >= max(1, len(summary["samples"]) // 2)}
++    (out / "probe_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
++    print(json.dumps({k: v for k, v in summary.items() if k != "samples"}, indent=2))
++    for s in summary["samples"]:
++        print(s["url"].rsplit("/", 1)[-1], s.get("status"), s.get("bytes"), s.get("last_modified"), s.get("lines"),
++              s.get("status_mentions"), s.get("extract_error") or s.get("error") or "")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_round12.py b/tests/test_round12.py
+new file mode 100644
+index 0000000..8a85121
+--- /dev/null
++++ b/tests/test_round12.py
+@@ -0,0 +1,117 @@
++import random
++from datetime import date, timedelta
++
++import pytest
++
++from scripts.book_disagreement import FROZEN, opening_quotes, pick_bets, run
++from v13.provenance import UnverifiedOddsError, quarantine
++
++
++def to_am(p):
++    return int(round(-100 * p / (1 - p))) if p >= 0.5 else int(round(100 * (1 - p) / p))
++
++
++def quote(p_over, vig=0.045):
++    """Two-sided American prices with margin split evenly."""
++    return to_am(min(0.95, p_over + vig / 2)), to_am(min(0.95, 1 - p_over + vig / 2))
++
++
++def world(seed=0, soft_book_wrong=True, n_days=150, stagger_min=0):
++    """4 books quote rebounds overs. Three sharp books quote close to the truth. The soft book is
++    off by 0.10 on 30% of props. If soft_book_wrong, the sharp books are right (the truth is their
++    probability); otherwise the soft book is right and the sharp books are the ones who are off."""
++    rng = random.Random(seed)
++    games, props, stats = [], [], []
++    gid = 0
++    for d in range(n_days):
++        day = (date(2025, 10, 22) + timedelta(days=d)).isoformat()
++        for _ in range(4):
++            gid += 1
++            games.append({"id": gid, "date": day, "datetime": day + "T23:30:00Z", "season": 2025,
++                          "home_team": {"id": 1}, "visitor_team": {"id": 2}, "status": "Final", "postseason": False})
++            for pid in range(gid * 10, gid * 10 + 5):
++                sharp = rng.uniform(0.35, 0.65)
++                soft = sharp + (rng.choice((-0.10, 0.10)) if rng.random() < 0.30 else 0.0)
++                soft = min(max(soft, 0.1), 0.9)
++                truth = sharp if soft_book_wrong else soft
++                line = 7.5
++                for k, v in enumerate(("draftkings", "fanduel", "betmgm", "caesars")):
++                    p = soft if v == "caesars" else sharp + rng.uniform(-0.005, 0.005)
++                    o, u = quote(p)
++                    minute = 0 if v != "caesars" else stagger_min
++                    props.append({"game_id": gid, "player_id": pid, "vendor": v, "prop_type": "rebounds",
++                                  "line_value": str(line), "opened_at": f"{day}T15:{minute:02d}:00Z" if minute < 60
++                                  else f"{day}T{15 + minute // 60}:{minute % 60:02d}:00Z",
++                                  "market": {"type": "over_under", "over_odds": o, "under_odds": u}})
++                reb = 9 if rng.random() < truth else 6
++                stats.append({"reb": reb, "pts": 10, "ast": 2, "fg3m": 1, "player": {"id": pid}, "game": {"id": gid}})
++    gated, _, _ = quarantine(props, games, "bdl_opening_player_props")
++    return gated, stats, props
++
++
++def test_price_outlier_passes_when_soft_book_is_wrong():
++    gated, stats, _ = world(seed=3, soft_book_wrong=True)
++    res = run(gated, stats)
++    h = res["hypotheses"]["H12a_price_outlier"]
++    assert h["verdict"] == "PASS", h["checks"]
++    assert h["primary"]["roi_pct"] > 5
++    assert all(r["vendor"] == "caesars" for r in h["sample"])
++    # betting against the outlier should match the consensus, not beat it
++    assert abs(h["primary"]["vs_consensus"]["z"]) < 2.5
++
++
++def test_price_outlier_fails_when_soft_book_is_right():
++    gated, stats, _ = world(seed=3, soft_book_wrong=False)
++    h = run(gated, stats)["hypotheses"]["H12a_price_outlier"]
++    assert h["verdict"] == "FAIL"
++    assert h["primary"]["roi_pct"] < 0
++
++
++def test_quotes_outside_the_window_are_not_compared():
++    gated, stats, _ = world(stagger_min=FROZEN["window_min"] + 30)
++    pb, _, _ = pick_bets(opening_quotes(gated))
++    assert all(b["vendor"] != "caesars" for b in pb)
++
++
++def test_one_bet_per_player_market_and_line_outlier_side():
++    t = "2025-11-01T15:00:00Z"
++    rows = []
++    for v, line in (("draftkings", 8.5), ("fanduel", 8.5), ("betmgm", 8.5), ("caesars", 7.5)):
++        rows.append({"game_id": 1, "player_id": 9, "vendor": v, "prop_type": "rebounds", "line_value": str(line),
++                     "opened_at": t, "market": {"type": "over_under", "over_odds": -110, "under_odds": -110}})
++    groups = opening_quotes(rows)
++    pb, lb, _ = pick_bets(groups)
++    assert len(lb) == 1 and lb[0]["vendor"] == "caesars" and lb[0]["side"] == "over" and lb[0]["gap"] == 1.0
++    assert pb == []  # identical prices at the same line: no price outlier
++
++
++def test_line_outlier_skips_heavily_juiced_side():
++    t = "2025-11-01T15:00:00Z"
++    rows = [{"game_id": 1, "player_id": 9, "vendor": v, "prop_type": "rebounds", "line_value": str(line),
++             "opened_at": t, "market": {"type": "over_under", "over_odds": oo, "under_odds": uo}}
++            for v, line, oo, uo in (("draftkings", 8.5, -110, -110), ("fanduel", 8.5, -110, -110),
++                                    ("betmgm", 8.5, -110, -110), ("caesars", 7.5, -175, 135))]
++    _, lb, _ = pick_bets(opening_quotes(rows))
++    assert lb == []
++
++
++def test_refuses_ungated_props():
++    _, stats, raw = world(n_days=3)
++    with pytest.raises(UnverifiedOddsError):
++        run(raw, stats)
++
++
++def test_injury_report_filename_times_and_links():
++    from scripts.injury_report_probe import candidate_urls, extract_links, report_time, spread_sample
++    hourly = report_time("https://ak-static.cms.nba.com/referee/injury/Injury-Report_2025-01-15_05PM.pdf")
++    assert hourly["eastern"].startswith("2025-01-15T17:00") and hourly["utc"].startswith("2025-01-15T22:00")
++    assert hourly["format"] == "hourly"
++    quarter = report_time("Injury-Report_2025-12-22_01_30PM.pdf")
++    assert quarter["eastern"].startswith("2025-12-22T13:30") and quarter["format"] == "quarter_hour"
++    assert report_time("Injury-Report_2025-12-22_12AM.pdf")["eastern"].startswith("2025-12-22T00:00")
++    assert report_time("other.pdf") is None
++    html = ('<a href="https://ak-static.cms.nba.com/referee/injury/Injury-Report_2025-11-05_05PM.pdf">x</a>'
++            '<a href="https://ak-static.cms.nba.com/referee/injury/Injury-Report_2025-11-05_05PM.pdf">dup</a>')
++    assert len(extract_links(html)) == 1
++    assert len(candidate_urls("2025-11-05")) == 24 * 5
++    assert spread_sample(list(range(100)), 5) == [0, 25, 50, 74, 99] and spread_sample([1, 2], 5) == [1, 2]
+-- 
+2.43.0
+

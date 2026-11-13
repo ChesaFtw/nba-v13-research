@@ -7,6 +7,7 @@ import argparse,json,os,time,requests
 from pathlib import Path
 from collections import Counter
 from datetime import datetime,timezone,timedelta
+from v13.pricing import pregame_status
 
 URL="https://api.balldontlie.io/nba/v2/odds/opening"
 VENDORS=("draftkings","fanduel","betmgm","caesars","betrivers","fanatics")
@@ -36,12 +37,14 @@ def fetch(ids,key):
         time.sleep(.25)
     return allrows
 
-def choose(rows):
+def choose(rows,tips=None):
+    """One opening row per game. With tips (game_id -> UTC tip), rows not opened before tip are dropped."""
     result={}
     for r in rows:
         gid=str(r.get("game_id"));vendor=str(r.get("vendor") or "").lower()
         opened=r.get("opened_at")
         if not opened:continue
+        if tips is not None and pregame_status(opened,tips.get(gid))!="pregame":continue
         try:stamp=datetime.fromisoformat(opened.replace("Z","+00:00"))
         except (ValueError,TypeError):continue
         if stamp.tzinfo is None:continue
