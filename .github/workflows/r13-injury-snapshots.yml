@@ -1,0 +1,38 @@
+name: V13 Injury-status snapshots (prospective news timing)
+on:
+  schedule:
+    - cron: '20 14-16 * * *'
+    - cron: '5,35 17-23 * * *'
+    - cron: '5,35 0-3 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: injury-snapshots
+  cancel-in-progress: false
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - id: cap
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.capture_injuries --out-dir research_data/injury_snapshots
+      - name: Upload to the weekly release (append-only; names are unique per capture)
+        if: always() && steps.cap.outputs.dir != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="injury-snapshots-${{ steps.cap.outputs.week }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --notes "Append-only injury-status snapshots stamped with capture time" --prerelease
+          cd "${{ steps.cap.outputs.dir }}"
+          for f in snapshot.jsonl manifest.json; do
+            gzip -9 -c "$f" > "${{ steps.cap.outputs.stem }}_$f.gz"
+            gh release upload "$TAG" "${{ steps.cap.outputs.stem }}_$f.gz"
+          done

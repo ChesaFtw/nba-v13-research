@@ -1,0 +1,70 @@
+name: V13 Prop Integrity Audit v2 (real prices, pre-tip, cross-season)
+on:
+  workflow_dispatch:
+  push:
+    paths: ['experiments/prop-integrity-v2.trigger']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt scikit-learn
+      - run: python -m pytest -q
+      - name: Locate latest successful artifact runs
+        run: |
+          latest() { gh run list --workflow "$1" --status success --limit 1 --json databaseId -q '.[0].databaseId'; }
+          echo "PILOT_RUN=$(latest v13-regular-pilot.yml)" >> "$GITHUB_ENV"
+          echo "LINES_RUN=$(latest full-historical-prop-lines.yml)" >> "$GITHUB_ENV"
+          echo "HOLDOUT_RUN=$(latest prop-holdout-backtest.yml)" >> "$GITHUB_ENV"
+          echo "T24_RUN=$(latest full-2024-threes.yml)" >> "$GITHUB_ENV"
+          echo "F24_RUN=$(latest 2024-player-stats.yml)" >> "$GITHUB_ENV"
+      - name: Download 2025-26 games, features source, lines and legacy holdout report
+        run: |
+          gh run download "$PILOT_RUN" -n v13-regular-pilot-2025 -D .
+          gh run download "$LINES_RUN" -n v13-full-opening-props-2025 -D research_results/prop_openings_full
+          gh run download "$HOLDOUT_RUN" -n v13-prop-holdout-backtest-2025 -D research_results/prop_backtest
+          python -u -m scripts.build_prop_research --season 2025 --input research_results/regular_season/regular_players_2025.jsonl
+      - name: "Step 1: audit the legacy 3PT ledger (prices, timestamps, duplicates, vs market)"
+        run: |
+          for m in threes assists points rebounds; do
+            python -u -m scripts.audit_prop_ledger --report research_results/prop_backtest/holdout_2025.json \
+              --lines research_results/prop_openings_full/opening_props_2025.jsonl \
+              --games research_data/game_history/games_2025.jsonl --market $m \
+              --out research_results/integrity_v2/ledger_audit_${m}_2025.json || echo "no ledger for $m"
+          done
+      - name: "Step 2: within-season v2 backtest at actual prices, and at -110 for comparison"
+        run: |
+          for pricing in actual assumed110; do
+            python -u -m scripts.backtest_prop_holdout_v2 --features research_data/prop_research/props_2025.jsonl \
+              --lines research_results/prop_openings_full/opening_props_2025.jsonl \
+              --games research_data/game_history/games_2025.jsonl --pricing $pricing \
+              --out research_results/integrity_v2/v2_within_2025_${pricing}.json
+          done
+      - name: "Step 3: cross-season threes (train 2024-25, test all of 2025-26)"
+        continue-on-error: true
+        run: |
+          gh run download "$T24_RUN" -n v13-full-2024-threes-lines -D research_data/multiseason_threes/2024
+          gh run download "$F24_RUN" -n v13-2024-player-prop-features -D artifacts24
+          F24=$(find artifacts24 -name props_2024.jsonl | head -1)
+          python -u -m scripts.backtest_prop_holdout_v2 --features research_data/prop_research/props_2025.jsonl \
+            --lines research_results/prop_openings_full/opening_props_2025.jsonl \
+            --games research_data/game_history/games_2025.jsonl \
+            --prior-features "$F24" --prior-lines research_data/multiseason_threes/2024/opening_threes.jsonl \
+            --prior-games research_data/multiseason_threes/2024/games.jsonl \
+            --out research_results/integrity_v2/v2_cross_2024_to_2025.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-prop-integrity-v2
+          path: research_results/integrity_v2/
+          retention-days: 90
+          if-no-files-found: warn

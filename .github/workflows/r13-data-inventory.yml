@@ -1,0 +1,27 @@
+name: V13 R13 — API data inventory (tracking / plays / lineups / injuries)
+on:
+  workflow_dispatch:
+  push:
+    paths: ['experiments/r13-data-inventory.trigger']
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - name: Bounded API probe (about 30 requests)
+        env:
+          BALLDONTLIE_API_KEY: ${{ secrets.BALLDONTLIE_API_KEY }}
+        run: python -u -m scripts.r13_data_inventory --api --out research_results/r13_inventory
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-r13-data-inventory
+          path: research_results/r13_inventory/
+          retention-days: 90

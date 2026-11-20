@@ -1,0 +1,12 @@
+{
+  "policy_version": 1,
+  "vendor": "caesars",
+  "markets": {"threes": "threes"},
+  "signal": "R13/R14 frozen threes recipe (frozen_threes_shadow_recipe from the R14 run)",
+  "min_prob_diff": 0.03,
+  "require_positive_ev": true,
+  "mode": "shadow",
+  "bankroll": 10000,
+  "stake_pct": 0.0025,
+  "notes": "mode 'shadow' records every eligible prop with stake 0. Changing mode to 'real' is the user's decision; the model has NOT met the shadow-success criteria (>= 300 qualified bets with closes, CLV > 0 with CI lower > 0, log-loss CI upper < 0)."
+}

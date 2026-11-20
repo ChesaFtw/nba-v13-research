@@ -1,0 +1,975 @@
+From ff3cd455c4ab21c2f889ae134d69b34b4c0f990d Mon Sep 17 00:00:00 2001
+From: Claude audit <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 19:17:11 -0500
+Subject: [PATCH] Round 9: historical odds quarantine with provenance (fail
+ closed), hardened live logger v2, retroactive-proof ledger, tier validation,
+ acceptance run
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ scripts/acceptance_round9.py        | 122 +++++++++++++++
+ scripts/backtest_prop_holdout_v2.py |  15 +-
+ scripts/export_prop_candidates.py   |  11 +-
+ scripts/game_model_v2.py            |   7 +
+ scripts/log_live_odds.py            | 229 +++++++++++++++++++++-------
+ scripts/prereg_v2_market.py         |   6 +-
+ scripts/quarantine_odds.py          |  36 +++++
+ scripts/rank_and_stake.py           |   6 +-
+ tests/test_round4.py                |  25 +--
+ tests/test_round9.py                |  82 ++++++++++
+ v13/ledger.py                       |  24 ++-
+ v13/provenance.py                   | 101 ++++++++++++
+ v13/tier_validation.py              |  51 +++++++
+ 13 files changed, 630 insertions(+), 85 deletions(-)
+ create mode 100644 scripts/acceptance_round9.py
+ create mode 100644 scripts/quarantine_odds.py
+ create mode 100644 tests/test_round9.py
+ create mode 100644 v13/provenance.py
+ create mode 100644 v13/tier_validation.py
+
+diff --git a/scripts/acceptance_round9.py b/scripts/acceptance_round9.py
+new file mode 100644
+index 0000000..5038e67
+--- /dev/null
++++ b/scripts/acceptance_round9.py
+@@ -0,0 +1,122 @@
++"""Round 9 end-to-end acceptance run (offline, synthetic fixtures; no API key needed).
++
++Demonstrates, and fails the run if any of these does not hold:
++  1. invalid historical prices are quarantined with explicit reasons and never silently dropped;
++  2. a validated pipeline refuses unstamped or contaminated odds (fails closed);
++  3. valid prospective logger observations are preserved with full provenance and stable ids;
++  4. the prospective ledger rejects retroactive, PASS-tier and backtest entries, and refuses to
++     report a file that mixes shadow and actual records.
++python -m scripts.acceptance_round9 --out research_results/acceptance/round9.json
++"""
++import argparse, json, tempfile
++from datetime import datetime, timezone
++from pathlib import Path
++
++from v13 import ledger
++from v13.provenance import UnverifiedOddsError, quarantine, require_eligible
++
++GAMES = [{"id": 1, "season": 2024, "datetime": "2025-01-10T00:30:00Z"},
++         {"id": 2, "season": 2025, "datetime": "2026-01-10T00:30:00Z"},
++         {"id": 3, "season": 2025, "datetime": "2026-01-11T00:30:00Z"},
++         {"id": 4, "season": 2025}]
++ROWS = [{"game_id": 1, "opened_at": "2025-01-09T15:00:00Z", "tag": "outside_coverage"},
++        {"game_id": 2, "opened_at": "2026-01-09T15:00:00Z", "tag": "valid"},
++        {"game_id": 3, "opened_at": "2026-01-11T00:30:00Z", "tag": "at_tip"},
++        {"game_id": 3, "tag": "no_timestamp"},
++        {"game_id": 4, "opened_at": "2026-01-09T15:00:00Z", "tag": "no_tip"},
++        {"game_id": 99, "opened_at": "2026-01-09T15:00:00Z", "tag": "unknown_game"}]
++
++
++class _Resp:
++    def __init__(self, payload, status=200):
++        self.status_code, self._p, self.headers = status, payload, {}
++        self.text = json.dumps(payload)
++    def json(self): return json.loads(self.text)
++    def raise_for_status(self): pass
++
++
++class _Session:
++    def get(self, url, params=None, headers=None, timeout=None):
++        if url.endswith("/v1/games"):
++            return _Resp({"data": [{"id": 7, "datetime": "2026-10-28T23:30:00Z"}], "meta": {}})
++        if url.endswith("/nba/v2/odds"):
++            return _Resp({"data": [{"game_id": 7, "vendor": "draftkings", "updated_at": "2026-10-28T17:55:00Z",
++                                    "spread_home_value": "-4.5", "spread_home_odds": -110, "spread_away_value": "4.5",
++                                    "spread_away_odds": -110, "total_value": "224.5", "total_over_odds": -108,
++                                    "total_under_odds": -112}], "meta": {}})
++        return _Resp({"data": [{"game_id": 7, "player_id": 11, "vendor": "fanduel", "prop_type": "rebounds",
++                                "line_value": "8.5", "updated_at": "2026-10-28T17:50:00Z",
++                                "market": {"type": "over_under", "over_odds": -120, "under_odds": 100}}]})
++
++
++def run():
++    checks = {}
++    elig, excl, summ = quarantine(ROWS, GAMES, "bdl_opening_player_props")
++    checks["only_documented_pretip_row_eligible"] = [r["tag"] for r in elig] == ["valid"]
++    checks["every_excluded_row_kept_with_reason"] = len(excl) == len(ROWS) - 1 and all(r["_prov"]["reason"] != "ok" for r in excl)
++    checks["reasons"] = summ["reasons"]
++    for name, rows in (("raw_unstamped_rows_rejected", [{k: v for k, v in r.items()} for r in ROWS]),
++                       ("contaminated_stamped_rows_rejected", excl)):
++        try:
++            require_eligible(rows); checks[name] = False
++        except UnverifiedOddsError:
++            checks[name] = True
++    checks["eligible_rows_accepted"] = bool(require_eligible(elig))
++    _, _, unknown = quarantine(ROWS[:1], GAMES, "some_unregistered_feed")
++    checks["unknown_source_fails_closed"] = unknown["eligible"] == 0 and unknown["reasons"] == {"unknown_source": 1}
++
++    from scripts.log_live_odds import snapshot
++    now = datetime(2026, 10, 28, 18, 0, tzinfo=timezone.utc)
++    obs, raw, man = snapshot("k", now=now, session=_Session(), commit="test")
++    again, _, _ = snapshot("k", now=now, session=_Session(), commit="test")
++    needed = {"observation_id", "quote_id", "captured_at_utc", "vendor_updated_at", "game_id", "tip_utc",
++              "sportsbook", "market", "side", "line", "american_odds", "source_endpoint", "response_sha256",
++              "logger_version", "git_commit"}
++    checks["logger_observations_have_provenance"] = len(obs) == 6 and all(needed <= set(o) for o in obs)
++    checks["logger_ids_deterministic"] = [o["observation_id"] for o in obs] == [o["observation_id"] for o in again]
++    checks["logger_raw_responses_hashed"] = all(len(r["sha256"]) == 64 for r in raw) and man["requests_used"] == 3
++
++    tmp = Path(tempfile.mkdtemp())
++    pred = {"prediction_id": "p1", "predicted_at_utc": "2026-10-28T18:00:00Z", "tip_utc": "2026-10-28T23:30:00Z",
++            "game_id": 7, "market": "prop_rebounds", "side": "over", "line": 8.5, "price": -120, "opp_price": 100,
++            "sportsbook": "fanduel", "p_model": 0.58, "p_market": 0.53, "ev": 0.04, "tier": "A",
++            "stake_pct_of_bankroll": 0.01, "model_version": "v", "git_commit": "test", "source": "live_logger"}
++    ledger.append_prediction(tmp / "s.jsonl", pred, "shadow", now=now)
++    def rejected(**kw):
++        try:
++            ledger.append_prediction(tmp / "s.jsonl", {**pred, **kw}, "shadow", now=now)
++            return False
++        except ValueError:
++            return True
++    checks["ledger_rejects_pass_tier"] = rejected(prediction_id="p2", tier="pass")
++    checks["ledger_rejects_backtest_source"] = rejected(prediction_id="p3", source="backtest_2025")
++    try:
++        ledger.append_prediction(tmp / "s.jsonl", {**pred, "prediction_id": "p4"}, "shadow",
++                                 now=datetime(2026, 10, 29, 1, tzinfo=timezone.utc))
++        checks["ledger_rejects_retroactive_entry"] = False
++    except ValueError:
++        checks["ledger_rejects_retroactive_entry"] = True
++    mixed = tmp / "m.jsonl"
++    ledger.append_prediction(mixed, pred, "shadow", now=now)
++    ledger.append_prediction(mixed, {**pred, "prediction_id": "p9", "confirmed_price": -120, "stake_amount": 100.0,
++                                     "bet_reference": "t"}, "actual", now=now)
++    try:
++        ledger.report(mixed); checks["mixed_ledger_report_refused"] = False
++    except ValueError:
++        checks["mixed_ledger_report_refused"] = True
++    checks["shadow_report_labelled"] = ledger.report(tmp / "s.jsonl")["ledger"].startswith("SHADOW")
++    passed = all(v for k, v in checks.items() if isinstance(v, bool))
++    return {"passed": passed, "checks": checks}
++
++
++def main():
++    p = argparse.ArgumentParser(); p.add_argument("--out", required=True); a = p.parse_args()
++    res = run()
++    Path(a.out).parent.mkdir(parents=True, exist_ok=True); Path(a.out).write_text(json.dumps(res, indent=2) + "\n")
++    print(json.dumps(res, indent=2))
++    if not res["passed"]:
++        raise SystemExit(1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/backtest_prop_holdout_v2.py b/scripts/backtest_prop_holdout_v2.py
+index 0819a94..b4ceca0 100644
+--- a/scripts/backtest_prop_holdout_v2.py
++++ b/scripts/backtest_prop_holdout_v2.py
+@@ -234,12 +234,20 @@ def evaluate_market(train, test, market, pricing):
+     return out
+ 
+ 
+-def evaluate(features, lines, games, pricing="actual", prior=None):
++def evaluate(features, lines, games, pricing="actual", prior=None, validated=False):
++    """validated=True: every line must carry a passing provenance-gate stamp (scripts/quarantine_odds.py),
++    else UnverifiedOddsError. The report's evidence_class says which kind of result this is."""
++    from v13.provenance import evidence_class, require_eligible
++    if validated:
++        require_eligible(lines, "prop backtest")
++        if prior:
++            require_eligible(prior["lines"], "prop backtest (prior season)")
+     if not tip_times(games):
+         raise RuntimeError("No tip times in games index; cannot verify pregame lines")
+     coverage = Counter()
+     rows = dataset(features, lines, tip_times(games), coverage)
+-    report = {"pricing": pricing, "line_rule": "vendor priority, earliest row with opened_at < tip",
++    report = {"evidence_class": evidence_class(validated), "pricing": pricing,
++              "line_rule": "vendor priority, earliest row with opened_at < tip",
+               "coverage": dict(coverage), "matched_rows": len(rows), "markets": {}}
+     if prior:
+         prior_cov = Counter()
+@@ -269,13 +277,14 @@ def main():
+     p.add_argument("--games", required=True); p.add_argument("--out", required=True)
+     p.add_argument("--pricing", choices=("actual", "assumed110"), default="actual")
+     p.add_argument("--prior-features"); p.add_argument("--prior-lines"); p.add_argument("--prior-games")
++    p.add_argument("--validated", action="store_true", help="require provenance-gate stamped lines (fail closed)")
+     a = p.parse_args()
+     prior = None
+     if a.prior_features or a.prior_lines or a.prior_games:
+         if not (a.prior_features and a.prior_lines and a.prior_games):
+             raise SystemExit("Cross-season mode needs --prior-features, --prior-lines and --prior-games")
+         prior = {"features": read(a.prior_features), "lines": read(a.prior_lines), "games": read(a.prior_games)}
+-    result = evaluate(read(a.features), read(a.lines), read(a.games), a.pricing, prior)
++    result = evaluate(read(a.features), read(a.lines), read(a.games), a.pricing, prior, validated=a.validated)
+     out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
+     out.write_text(json.dumps(result, indent=2) + "\n")
+     brief = {k: v for k, v in result.items() if k != "markets"}
+diff --git a/scripts/export_prop_candidates.py b/scripts/export_prop_candidates.py
+index 0ca321c..108e7b0 100644
+--- a/scripts/export_prop_candidates.py
++++ b/scripts/export_prop_candidates.py
+@@ -40,9 +40,12 @@ def probability(proj, line, market, sigma):
+     return over, push
+ 
+ 
+-def export(seasons):
++def export(seasons, validated=False):
++    from v13.provenance import evidence_class, require_eligible
+     rows, coverage = [], Counter()
+     for s in seasons:
++        if validated:
++            require_eligible(s["lines"], f"prop candidates season {s['season']}")
+         cov = Counter()
+         for r in dataset(s["features"], s["lines"], tip_times(s["games"]), cov):
+             if r["over_odds"] is None or r["under_odds"] is None:
+@@ -74,7 +77,8 @@ def export(seasons):
+                                 "line": r["line"], "price": price, "opp_price": opp,
+                                 "p_model": min(max(p_side / no_push, 1e-4), 1 - 1e-4), "p_push": push,
+                                 "projection": round(proj, 3), "model_version": "ridge_rolling_poisson_v1",
+-                                "vendor": r["vendor"], "opened_at": r["opened_at"], "outcome": outcome})
++                                "vendor": r["vendor"], "opened_at": r["opened_at"], "outcome": outcome,
++                                "evidence_class": evidence_class(validated)})
+     return out, dict(coverage)
+ 
+ 
+@@ -85,12 +89,13 @@ def main():
+     p.add_argument("--lines", action="append", required=True)
+     p.add_argument("--games", action="append", required=True)
+     p.add_argument("--out", required=True)
++    p.add_argument("--validated", action="store_true", help="require provenance-gate stamped lines (fail closed)")
+     a = p.parse_args()
+     if not len(a.season) == len(a.features) == len(a.lines) == len(a.games):
+         raise SystemExit("Give --season/--features/--lines/--games once per season, in the same order")
+     seasons = [{"season": s, "features": read(f), "lines": read(l), "games": read(g)}
+                for s, f, l, g in zip(a.season, a.features, a.lines, a.games)]
+-    cands, coverage = export(seasons)
++    cands, coverage = export(seasons, validated=a.validated)
+     out = Path(a.out); out.parent.mkdir(parents=True, exist_ok=True)
+     out.write_text("".join(json.dumps(c) + "\n" for c in cands))
+     print(json.dumps({"candidates": len(cands), "by_market": Counter(c["market"] for c in cands), "coverage": coverage}, indent=2))
+diff --git a/scripts/game_model_v2.py b/scripts/game_model_v2.py
+index 8bc9e15..bc12960 100644
+--- a/scripts/game_model_v2.py
++++ b/scripts/game_model_v2.py
+@@ -169,13 +169,20 @@ def main():
+     p.add_argument("--stats", action="append", required=True)
+     p.add_argument("--odds", action="append", required=True)
+     p.add_argument("--out-candidates", required=True); p.add_argument("--out-report", required=True)
++    p.add_argument("--validated", action="store_true", help="require provenance-gate stamped odds (fail closed)")
+     a = p.parse_args()
+     games = [g for path in a.games for g in read(path) if g.get("postseason") is False]
+     stats = [s for path in a.stats for s in read(path)]
+     odds = [o for path in a.odds for o in read(path)]
++    from v13.provenance import evidence_class, require_eligible
++    if a.validated:
++        require_eligible(odds, "game model")
+     rows, coverage = build_rows(games, stats, odds)
+     cands, report = run(rows)
+     report["coverage"] = dict(coverage); report["rows"] = len(rows)
++    report["evidence_class"] = evidence_class(a.validated)
++    for c in cands:
++        c["evidence_class"] = report["evidence_class"]
+     report["rows_by_season"] = dict(Counter(str(r.get("season")) for r in rows))
+     report["candidates_by_season"] = dict(Counter(str(c.get("season")) for c in cands))
+     report["games_by_season"] = dict(Counter(str(g.get("season")) for g in games))
+diff --git a/scripts/log_live_odds.py b/scripts/log_live_odds.py
+index af384b2..3184cef 100644
+--- a/scripts/log_live_odds.py
++++ b/scripts/log_live_odds.py
+@@ -1,94 +1,215 @@
+-"""Append-only snapshot logger for current NBA game odds and player props (closing lines / CLV).
++"""Append-only live odds logger (v2): normalized, provenance-stamped observations.
+ 
+-Each run fetches today's and tomorrow's games (America/Chicago), then every vendor's current
+-game odds and player props, stamps each row with retrieved_at_utc, and writes one JSONL file
+-per run. The workflow uploads that file to a weekly GitHub Release (under the 1,000-asset cap) so data is never lost to
+-artifact retention. Never edits or deletes earlier snapshots.
++Each run captures current BALLDONTLIE game odds (spread / total / moneyline) for today's and
++tomorrow's games (America/Chicago) and current player props for games tipping within
++--props-window-hours. Every quote side becomes one observation row:
+ 
+-python -m scripts.log_live_odds --out-dir research_data/live_odds
++  observation_id   sha256(quote_id | captured_at_utc)   unique per capture
++  quote_id         sha256(endpoint|game|player|book|market|side|line|odds|vendor_ts)  same quote seen again -> same id
++  captured_at_utc  our clock (the time we SAW the quote)        vendor_updated_at  the vendor's timestamp
++  game_id, tip_utc, seconds_to_tip, player_id, sportsbook, market, side, line, american_odds
++  source_endpoint, response_sha256 (hash of the raw HTTP body), logger_version, git_commit
++  stale_vendor_quote (vendor timestamp older than --stale-hours at capture)
++
++Outputs per run (unique, timestamped names; never overwritten): observations.jsonl,
++raw_responses.jsonl (endpoint, params, status, sha256, body) and manifest.json.
++
++Fails loudly: missing key (exit 2), rejected key (exit 4), schema drift above --max-schema-error-share
++(exit 3). A per-run request budget (--max-requests) stops the run early and is recorded.
+ """
+-import argparse, json, os, time
++import argparse, hashlib, json, os, sys, time
++from collections import Counter
+ from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ from zoneinfo import ZoneInfo
+ 
+ import requests
+ 
++from v13.pricing import parse_utc
++
+ BASE = "https://api.balldontlie.io"
++LOGGER_VERSION = "live-logger-2"
++GAME_REQUIRED = ("game_id", "vendor", "updated_at")
++PROP_REQUIRED = ("game_id", "player_id", "vendor", "prop_type", "market", "updated_at")
++
++
++class CredentialError(RuntimeError):
++    pass
++
++
++class Budget:
++    def __init__(self, max_requests):
++        self.max, self.used, self.exhausted = max_requests, 0, False
++
++    def take(self):
++        if self.used >= self.max:
++            self.exhausted = True
++            return False
++        self.used += 1
++        return True
++
+ 
++def sha(text):
++    return hashlib.sha256(text.encode()).hexdigest()
+ 
+-def get(session, path, params, key, tries=6):
++
++def get(session, path, params, key, budget, raw_log, captured, tries=6):
++    """One budgeted request with Retry-After backoff; every raw body is hashed and kept."""
+     for attempt in range(tries):
++        if not budget.take():
++            return None
+         r = session.get(BASE + path, params=params, headers={"Authorization": key}, timeout=40)
+-        if r.status_code in (429, 500, 502, 503, 504):
+-            time.sleep(min(5 * (attempt + 1), 30)); continue
++        body = r.text
++        raw_log.append({"captured_at_utc": captured, "endpoint": path, "params": params, "status": r.status_code,
++                        "sha256": sha(body), "body": body if r.status_code == 200 else body[:500]})
++        if r.status_code in (401, 403):
++            raise CredentialError(f"BALLDONTLIE rejected the API key on {path} (HTTP {r.status_code})")
++        if r.status_code == 429 or r.status_code >= 500:
++            wait = r.headers.get("Retry-After") if hasattr(r, "headers") else None
++            try:
++                delay = min(max(float(wait), 1), 60) if wait else min(5 * (attempt + 1), 60)
++            except ValueError:
++                delay = min(5 * (attempt + 1), 60)
++            time.sleep(delay)
++            continue
+         r.raise_for_status()
+-        return r.json()
+-    r.raise_for_status()
++        payload = r.json()
++        payload["_sha256"] = raw_log[-1]["sha256"]
++        return payload
++    raise RuntimeError(f"{path}: retries exhausted")
+ 
+ 
+-def paged(session, path, params, key):
+-    cursor, rows = None, []
+-    while True:
+-        q = list(params) + [("per_page", "100")] + ([("cursor", str(cursor))] if cursor is not None else [])
+-        payload = get(session, path, q, key)
+-        rows += payload.get("data", [])
+-        cursor = (payload.get("meta") or {}).get("next_cursor")
+-        if cursor is None:
+-            return rows
++def _obs(endpoint, row, market, side, line, odds, captured, tip, sha256, commit, stale_hours):
++    vendor_ts = row.get("updated_at")
++    quote = "|".join(str(x) for x in (endpoint, row.get("game_id"), row.get("player_id"), row.get("vendor"),
++                                      market, side, line, odds, vendor_ts))
++    qid = sha(quote)
++    cap, vt = parse_utc(captured), parse_utc(vendor_ts)
++    return {"observation_id": sha(qid + "|" + captured), "quote_id": qid, "captured_at_utc": captured,
++            "vendor_updated_at": vendor_ts, "game_id": row.get("game_id"), "tip_utc": tip.isoformat() if tip else None,
++            "seconds_to_tip": int((tip - cap).total_seconds()) if tip and cap else None,
++            "player_id": row.get("player_id"), "sportsbook": row.get("vendor"), "market": market, "side": side,
++            "line": line, "american_odds": odds, "source_endpoint": endpoint, "response_sha256": sha256,
++            "logger_version": LOGGER_VERSION, "git_commit": commit,
++            "stale_vendor_quote": bool(cap and vt and cap - vt > timedelta(hours=stale_hours))}
++
++
++def normalize_game(row, captured, tip, sha256, commit, stale_hours):
++    ep = "/nba/v2/odds"
++    pairs = [("spread", "home", row.get("spread_home_value"), row.get("spread_home_odds")),
++             ("spread", "away", row.get("spread_away_value"), row.get("spread_away_odds")),
++             ("total", "over", row.get("total_value"), row.get("total_over_odds")),
++             ("total", "under", row.get("total_value"), row.get("total_under_odds")),
++             ("moneyline", "home", None, row.get("moneyline_home_odds")),
++             ("moneyline", "away", None, row.get("moneyline_away_odds"))]
++    return [_obs(ep, row, m, s, l, o, captured, tip, sha256, commit, stale_hours) for m, s, l, o in pairs if o is not None]
+ 
+ 
+-def snapshot(key, now=None):
++def normalize_prop(row, captured, tip, sha256, commit, stale_hours):
++    ep, mk = "/nba/v2/odds/player_props", row.get("market") or {}
++    market = f"prop_{row.get('prop_type')}"
++    if mk.get("type") == "over_under":
++        sides = [("over", mk.get("over_odds")), ("under", mk.get("under_odds"))]
++    elif mk.get("type") == "milestone":
++        sides = [("milestone_yes", mk.get("odds"))]
++    else:
++        return None  # schema drift
++    return [_obs(ep, row, market, s, row.get("line_value"), o, captured, tip, sha256, commit, stale_hours)
++            for s, o in sides if o is not None]
++
++
++def snapshot(key, now=None, max_requests=80, props_window_hours=14, stale_hours=6, commit=None, session=None):
+     now = now or datetime.now(timezone.utc)
++    captured = now.isoformat()
++    s = session or requests.Session()
++    budget, raw, schema = Budget(max_requests), [], Counter()
+     local = now.astimezone(ZoneInfo("America/Chicago")).date()
+     dates = [local.isoformat(), (local + timedelta(days=1)).isoformat()]
+-    s = requests.Session()
+-    games = paged(s, "/v1/games", [("dates[]", d) for d in dates], key)
+-    upcoming = [g for g in games if g.get("status_state", "scheduled") in ("scheduled", "delayed")
+-                or str(g.get("status", "")).endswith("ET")]
+-    stamp = now.isoformat()
+-    rows = []
++    games, cursor = [], None
++    while True:
++        params = [("dates[]", d) for d in dates] + [("per_page", "100")] + ([("cursor", str(cursor))] if cursor else [])
++        payload = get(s, "/v1/games", params, key, budget, raw, captured)
++        if payload is None:
++            break
++        games += payload.get("data", [])
++        cursor = (payload.get("meta") or {}).get("next_cursor")
++        if not cursor:
++            break
++    tips = {str(g["id"]): parse_utc(g.get("datetime")) for g in games}
++    upcoming = [g for g in games if tips.get(str(g["id"])) and tips[str(g["id"])] > now]
++    obs = []
+     ids = [g["id"] for g in upcoming]
+     for i in range(0, len(ids), 10):
+-        for r in paged(s, "/nba/v2/odds", [("game_ids[]", str(x)) for x in ids[i:i + 10]], key):
+-            rows.append({"kind": "game_odds", "retrieved_at_utc": stamp, **r})
+-    for gid in ids:
+-        cursor, seen = None, set()
+-        while True:  # follow a cursor if the endpoint ever paginates; never assume one page
+-            params = [("game_id", str(gid))] + ([("cursor", str(cursor))] if cursor is not None else [])
+-            payload = get(s, "/nba/v2/odds/player_props", params, key)
+-            for r in payload.get("data", []):
+-                rows.append({"kind": "player_prop", "retrieved_at_utc": stamp, **r})
+-            cursor = (payload.get("meta") or {}).get("next_cursor")
+-            if cursor is None or str(cursor) in seen:
+-                break
+-            seen.add(str(cursor))
++        payload = get(s, "/nba/v2/odds", [("game_ids[]", str(x)) for x in ids[i:i + 10]] + [("per_page", "100")],
++                      key, budget, raw, captured)
++        if payload is None:
++            break
++        for r in payload.get("data", []):
++            if any(r.get(k) is None for k in GAME_REQUIRED):
++                schema["game_odds_missing_required"] += 1; continue
++            obs += normalize_game(r, captured, tips.get(str(r["game_id"])), payload["_sha256"], commit, stale_hours)
++            schema["game_odds_rows"] += 1
++    soon = [g for g in upcoming if tips[str(g["id"])] - now <= timedelta(hours=props_window_hours)]
++    for g in soon:
++        payload = get(s, "/nba/v2/odds/player_props", [("game_id", str(g["id"]))], key, budget, raw, captured)
++        if payload is None:
++            break
++        for r in payload.get("data", []):
++            if any(r.get(k) is None for k in PROP_REQUIRED):
++                schema["prop_missing_required"] += 1; continue
++            rows = normalize_prop(r, captured, tips.get(str(r["game_id"])), payload["_sha256"], commit, stale_hours)
++            if rows is None:
++                schema["prop_unknown_market_type"] += 1; continue
++            obs += rows; schema["prop_rows"] += 1
+         time.sleep(0.1)
+-    tips = {str(g["id"]): g.get("datetime") for g in upcoming}
+-    for r in rows:
+-        r["tip_utc"] = tips.get(str(r.get("game_id")))
+-    return rows, len(upcoming)
++    seen, unique = set(), []
++    for o in obs:
++        if o["observation_id"] not in seen:
++            seen.add(o["observation_id"]); unique.append(o)
++    bad = schema["game_odds_missing_required"] + schema["prop_missing_required"] + schema["prop_unknown_market_type"]
++    total = bad + schema["game_odds_rows"] + schema["prop_rows"]
++    manifest = {"captured_at_utc": captured, "logger_version": LOGGER_VERSION, "git_commit": commit,
++                "games_found": len(games), "upcoming_games": len(upcoming), "prop_games_polled": len(soon),
++                "requests_used": budget.used, "request_budget": budget.max, "budget_exhausted": budget.exhausted,
++                "observations": len(unique), "duplicates_dropped": len(obs) - len(unique),
++                "stale_vendor_quotes": sum(o["stale_vendor_quote"] for o in unique),
++                "schema": dict(schema), "schema_error_share": round(bad / total, 4) if total else 0.0}
++    return unique, raw, manifest
+ 
+ 
+ def main():
+     p = argparse.ArgumentParser()
+     p.add_argument("--out-dir", default="research_data/live_odds")
++    p.add_argument("--max-requests", type=int, default=80)
++    p.add_argument("--props-window-hours", type=float, default=14)
++    p.add_argument("--stale-hours", type=float, default=6)
++    p.add_argument("--max-schema-error-share", type=float, default=0.2)
+     a = p.parse_args()
+     key = os.environ.get("BALLDONTLIE_API_KEY")
+     if not key:
+-        raise RuntimeError("BALLDONTLIE_API_KEY not set")
+-    rows, n_games = snapshot(key)
++        print("ERROR: BALLDONTLIE_API_KEY is not set; nothing captured.", file=sys.stderr)
++        sys.exit(2)
+     now = datetime.now(timezone.utc)
+-    out = Path(a.out_dir) / now.strftime("%Y-%m") / f"snapshot_{now.strftime('%Y%m%dT%H%M%SZ')}.jsonl"
+-    out.parent.mkdir(parents=True, exist_ok=True)
+-    out.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
+-    print(json.dumps({"file": str(out), "upcoming_games": n_games, "rows": len(rows),
+-                      "game_odds": sum(r["kind"] == "game_odds" for r in rows),
+-                      "player_props": sum(r["kind"] == "player_prop" for r in rows)}))
++    try:
++        obs, raw, manifest = snapshot(key, now, a.max_requests, a.props_window_hours, a.stale_hours,
++                                      os.environ.get("GITHUB_SHA"))
++    except CredentialError as e:
++        print(f"ERROR: {e}", file=sys.stderr)
++        sys.exit(4)
++    stem = now.strftime("%Y%m%dT%H%M%SZ")
++    out = Path(a.out_dir) / now.strftime("%G-W%V") / stem
++    out.mkdir(parents=True, exist_ok=False)  # never reuse a run directory
++    (out / "observations.jsonl").write_text("".join(json.dumps(o, separators=(",", ":")) + "\n" for o in obs))
++    (out / "raw_responses.jsonl").write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in raw))
++    (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
++    print(json.dumps(manifest, indent=2))
+     gh = os.environ.get("GITHUB_OUTPUT")
+     if gh:
+         with open(gh, "a") as f:
+-            f.write(f"file={out}\nweek={now.strftime('%G-W%V')}\nrows={len(rows)}\n")
++            f.write(f"dir={out}\nstem={stem}\nweek={now.strftime('%G-W%V')}\nrows={len(obs)}\n")
++    if manifest["schema_error_share"] > a.max_schema_error_share:
++        print("ERROR: schema drift above threshold; data kept, run marked failed.", file=sys.stderr)
++        sys.exit(3)
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/scripts/prereg_v2_market.py b/scripts/prereg_v2_market.py
+index 46e1a37..6fb4919 100644
+--- a/scripts/prereg_v2_market.py
++++ b/scripts/prereg_v2_market.py
+@@ -38,8 +38,8 @@ def grade(ledger):
+     return out
+ 
+ 
+-def run(features, lines, games, market, selector):
+-    rep = evaluate(features, lines, games, "actual")
++def run(features, lines, games, market, selector, validated=False):
++    rep = evaluate(features, lines, games, "actual", validated=validated)
+     m = rep["markets"].get(market) or {}
+     if m.get("status") != "evaluated" or not isinstance(m.get(selector), dict) or "holdout_ledger" not in m[selector]:
+         return {"verdict": "UNTESTABLE", "reason": f"pipeline did not evaluate {market}/{selector}", "detail": m,
+@@ -58,7 +58,7 @@ def run(features, lines, games, market, selector):
+         "z_ge_2_power": ((primary.get("power") or {}).get("z") or -9) >= RULE["min_z"],
+     }
+     verdict = "UNTESTABLE" if priced_share < RULE["min_priced_share"] else ("PASS" if all(checks.values()) else "FAIL")
+-    return {"verdict": verdict, "market": market, "selector": selector, "rule": RULE, "checks": checks,
++    return {"verdict": verdict, "evidence_class": rep["evidence_class"], "market": market, "selector": selector, "rule": RULE, "checks": checks,
+             "frozen_threshold": m[selector]["threshold"], "holdout_start": rep.get("holdout_start"),
+             "priced_share": round(priced_share, 4), "lines_dropped_not_pregame": dropped, "coverage": cov,
+             "primary": primary,
+diff --git a/scripts/quarantine_odds.py b/scripts/quarantine_odds.py
+new file mode 100644
+index 0000000..8c1f725
+--- /dev/null
++++ b/scripts/quarantine_odds.py
+@@ -0,0 +1,36 @@
++"""Apply the historical-odds eligibility gate to one raw odds file. Nothing is deleted.
++
++Writes <out>/eligible.jsonl (stamped, usable with --validated), <out>/excluded.jsonl (stamped
++with the exclusion reason, kept for forensics) and <out>/summary.json.
++
++python -m scripts.quarantine_odds --source bdl_opening_player_props --games games_2025.jsonl \
++    --odds opening_props_2025.jsonl --out research_data/quarantine/props_2025
++"""
++import argparse, json
++from pathlib import Path
++
++from v13.provenance import SOURCES, quarantine
++
++
++def read(p):
++    return [json.loads(x) for x in Path(p).open() if x.strip()]
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--source", required=True, choices=sorted(SOURCES))
++    p.add_argument("--games", action="append", required=True, help="one or more game index files")
++    p.add_argument("--odds", required=True)
++    p.add_argument("--out", required=True)
++    a = p.parse_args()
++    games = [g for path in a.games for g in read(path)]
++    eligible, excluded, summary = quarantine(read(a.odds), games, a.source)
++    out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
++    (out / "eligible.jsonl").write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in eligible))
++    (out / "excluded.jsonl").write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in excluded))
++    (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
++    print(json.dumps(summary, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/rank_and_stake.py b/scripts/rank_and_stake.py
+index b254566..6b0d5e0 100644
+--- a/scripts/rank_and_stake.py
++++ b/scripts/rank_and_stake.py
+@@ -128,7 +128,10 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
+     if split_date:
+         days = lambda rows: len({c["date"] for c in rows})
+         scale = days(val) / max(days(test), 1)
+-    report = {"grouping": grouping, "validation_season": validation_season, "test_season": test_season, "split_date": split_date,
++    classes = {c.get("evidence_class", "exploratory_unverified_prices") for c in candidates}
++    report = {"evidence_class": "validated" if classes == {"validated"} else "exploratory_unverified_prices",
++              "candidate_evidence_classes": sorted(classes),
++              "grouping": grouping, "validation_season": validation_season, "test_season": test_season, "split_date": split_date,
+               "validation_to_test_day_ratio": round(scale, 3),
+               "scored_candidates": dict(Counter(c["market"] for c in scored)),
+               "calibration_fits_last_period": fits[max(fits)],
+@@ -147,6 +150,7 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
+             "test": {**{f"{st}": {k: v for k, v in r.items() if k != "ledger"} for st, r in sims.items()},
+                      **{f"monte_carlo_{st}": monte_carlo(r["ledger"], st, mc_paths) for st, r in sims.items()}},
+             "actionable_qualified_in_test": len(chosen),
++            "tier_validation": __import__("v13.tier_validation", fromlist=["validate_tiers"]).validate_tiers(chosen),
+             "shortfall_vs_target": max(0, n - len(chosen)),
+             "game_cluster_roi_ci": game_cluster_bootstrap_roi(chosen),
+             "selected_bets_calibration_test": selection_calibration(chosen),
+diff --git a/tests/test_round4.py b/tests/test_round4.py
+index 2d517b4..125ac85 100644
+--- a/tests/test_round4.py
++++ b/tests/test_round4.py
+@@ -52,26 +52,11 @@ def test_consistency_no_edge_when_props_are_right():
+ 
+ 
+ def test_live_logger_stamps_rows():
+-    class Resp:
+-        status_code = 200
+-        def __init__(self, payload): self.payload = payload
+-        def json(self): return self.payload
+-        def raise_for_status(self): pass
+-    class Session:
+-        def get(self, url, params=None, headers=None, timeout=None):
+-            if url.endswith("/v1/games"):
+-                return Resp({"data": [{"id": 5, "status_state": "scheduled", "datetime": "2026-10-21T23:30:00Z"}], "meta": {}})
+-            if url.endswith("/nba/v2/odds"):
+-                return Resp({"data": [{"game_id": 5, "vendor": "dk", "total_value": "221.5"}], "meta": {}})
+-            return Resp({"data": [{"game_id": 5, "player_id": 9, "prop_type": "points"}]})
+-    original = logger.requests.Session
+-    logger.requests.Session = Session
+-    try:
+-        rows, n = logger.snapshot("k")
+-    finally:
+-        logger.requests.Session = original
+-    assert n == 1 and len(rows) == 2
+-    assert all(r["retrieved_at_utc"] and r["tip_utc"] == "2026-10-21T23:30:00Z" for r in rows)
++    from datetime import datetime, timezone
++    from scripts.acceptance_round9 import _Session
++    obs, raw, manifest = logger.snapshot("k", now=datetime(2026, 10, 28, 18, tzinfo=timezone.utc), session=_Session(), commit="c")
++    assert manifest["upcoming_games"] == 1 and len(obs) == 6
++    assert all(o["captured_at_utc"] and o["tip_utc"] == "2026-10-28T23:30:00+00:00" for o in obs)
+ 
+ 
+ def test_power_devig_and_prereg_runner():
+diff --git a/tests/test_round9.py b/tests/test_round9.py
+new file mode 100644
+index 0000000..28af20c
+--- /dev/null
++++ b/tests/test_round9.py
+@@ -0,0 +1,82 @@
++import pytest
++from datetime import datetime, timezone
++
++from v13.provenance import GATE_VERSION, UnverifiedOddsError, assess, quarantine, require_eligible
++from v13.tier_validation import validate_tiers
++
++
++def test_gate_reasons_and_fail_closed():
++    tip = datetime(2026, 1, 10, 0, 30, tzinfo=timezone.utc)
++    ok = {"opened_at": "2026-01-09T12:00:00Z"}
++    assert assess(ok, "bdl_opening_player_props", tip, 2025) == (True, "ok")
++    assert assess(ok, "bdl_opening_player_props", tip, 2024)[1] == "season_outside_documented_coverage"
++    assert assess(ok, "bdl_opening_player_props", tip, None)[1] == "unknown_season"
++    assert assess(ok, "mystery_feed", tip, 2025)[1] == "unknown_source"
++    assert assess({"opened_at": "2026-01-10T00:30:00Z"}, "bdl_opening_game_odds", tip, 2025)[1] == "quote_at_or_after_tip"
++    assert assess({}, "bdl_opening_game_odds", tip, 2025)[1] == "missing_quote_timestamp"
++    assert assess(ok, "bdl_opening_game_odds", None, 2025)[1] == "missing_tip_time"
++    # our own logger: capture time is authoritative for any season
++    assert assess({"captured_at_utc": "2026-01-09T12:00:00Z"}, "v13_live_logger", tip, 2031) == (True, "ok")
++
++
++def test_quarantine_preserves_everything_and_stamps():
++    games = [{"id": 1, "season": 2025, "datetime": "2026-01-10T00:30:00Z"}]
++    rows = [{"game_id": 1, "opened_at": "2026-01-09T12:00:00Z"}, {"game_id": 1, "opened_at": "2026-01-10T03:00:00Z"}]
++    e, x, s = quarantine(rows, games, "bdl_opening_game_odds")
++    assert len(e) == 1 and len(x) == 1 and s["rows"] == 2
++    assert e[0]["_prov"]["gate_version"] == GATE_VERSION and x[0]["_prov"]["reason"] == "quote_at_or_after_tip"
++    with pytest.raises(UnverifiedOddsError):
++        require_eligible(e + x)
++    with pytest.raises(UnverifiedOddsError):  # forged stamp from another gate version is refused
++        require_eligible([{**e[0], "_prov": {**e[0]["_prov"], "gate_version": "old"}}])
++
++
++def test_validated_backtest_refuses_unstamped_lines_and_labels_evidence():
++    from tests.test_pricing_and_v2 import synthetic_season
++    from scripts.backtest_prop_holdout_v2 import evaluate
++    feats, lines, games = synthetic_season(3, priced=True)
++    with pytest.raises(UnverifiedOddsError):
++        evaluate(feats, lines, games, "actual", validated=True)
++    for g in games:
++        g["season"] = 2025
++    elig, excl, _ = quarantine(lines, games, "bdl_opening_player_props")
++    rep = evaluate(feats, elig, games, "actual", validated=True)
++    assert rep["evidence_class"] == "validated" and not excl
++    assert evaluate(feats, lines, games, "actual")["evidence_class"] == "exploratory_unverified_prices"
++
++
++def test_rank_report_never_calls_mixed_evidence_validated():
++    from scripts.rank_and_stake import run
++    import random
++    rng = random.Random(1); cands = []
++    for i in range(3000):
++        t = rng.uniform(0.4, 0.6); w = rng.random() < t
++        cands.append({"candidate_id": str(i), "season": 2025, "date": f"2026-{1 + i // 600:02d}-{1 + i % 28:02d}",
++                      "game_id": str(i), "player_id": None, "market": "m", "side": "over", "line": 1.5, "price": -110,
++                      "opp_price": -110, "p_model": t, "outcome": "win" if w else "loss", "model_version": "v",
++                      "evidence_class": "validated" if i % 2 else "exploratory_unverified_prices"})
++    rep = run(cands, test_season=2025, split_date="2026-03-01", targets=(20,), mc_paths=50)
++    assert rep["evidence_class"] == "exploratory_unverified_prices"
++
++
++def _bet(tier, win, i, price=-110, pm=0.5):
++    return {"tier": tier, "outcome": "win" if win else "loss", "price": price, "p_market": pm,
++            "date": f"2026-{11 + i % 2:02d}-01", "game_id": str(i // 2)}
++
++
++def test_tier_validation_orders_and_flags():
++    bets = []
++    for i in range(300):
++        bets.append(_bet("A", i % 100 < 52, i))
++        bets.append(_bet("A+", i % 100 < 56, 1000 + i))
++        bets.append(_bet("A++", i % 100 < 60, 2000 + i))
++    rep = validate_tiers(bets)
++    assert rep["ordering"] == {"excess": "increasing", "roi_pct": "increasing"} and rep["verdict"] == "tiers_supported"
++    small = validate_tiers(bets[:30])
++    assert small["ordering"]["excess"] == "insufficient_sample" and small["verdict"] == "use_flat_staking"
++    assert "multi_bet_games" in rep["correlation"] and rep["qualified_per_month"]
++
++
++def test_acceptance_script_passes():
++    from scripts.acceptance_round9 import run
++    assert run()["passed"]
+diff --git a/v13/ledger.py b/v13/ledger.py
+index db49ac6..ab34a2e 100644
+--- a/v13/ledger.py
++++ b/v13/ledger.py
+@@ -74,6 +74,11 @@ def append_prediction(path, pred, kind="shadow", now=None):
+         raise ValueError("prediction must be timestamped before tip")
+     if stamped > now:
+         raise ValueError("prediction timestamp is in the future")
++    if not now < tip:
++        raise ValueError("retroactive entry: the record is being written at/after tip, so it cannot join the "
++                         "prospective record even if predicted_at_utc is earlier")
++    if str(pred.get("source", "")).lower().startswith(("backtest", "historical", "exploratory")):
++        raise ValueError("backtest/exploratory output can never be written to a prospective ledger")
+     has_actual = any(pred.get(k) is not None for k in ACTUAL_ONLY)
+     if kind == "shadow" and has_actual:
+         raise ValueError("shadow ledger cannot carry bet confirmation fields")
+@@ -113,6 +118,20 @@ def append_settlement(path, pid, outcome, settled_at_utc, source):
+                           "settled_at_utc": settled_at_utc, "source": source, "ledger_kind": pred["ledger_kind"]})
+ 
+ 
++def ledger_bets(path):
++    """Join predictions to settlements (verified chain) for tier validation."""
++    recs = read(path); verify(path)
++    sett = {r["prediction_id"]: r for r in recs if r["record"] == "settlement"}
++    out = []
++    for p in (r for r in recs if r["record"] == "prediction"):
++        s = sett.get(p["prediction_id"])
++        if s:
++            price = p["confirmed_price"] if p["ledger_kind"] == "actual" else p["price"]
++            out.append({"tier": p["tier"], "price": price, "outcome": s["outcome"], "p_market": p["p_market"],
++                        "date": p["predicted_at_utc"][:10], "game_id": p["game_id"]})
++    return out
++
++
+ def report(path):
+     """Summary that labels itself with the ledger kind; shadow results are never called profit."""
+     recs = read(path); verify(path)
+@@ -126,9 +145,12 @@ def report(path):
+         p = preds.get(c["prediction_id"])
+         if p and c.get("close_opp_price") is not None and float(c["close_line"]) == float(p["line"]):
+             clv.append(no_vig_pair(c["close_price"], c["close_opp_price"])[0] - no_vig_pair(p["price"], p["opp_price"])[0])
+-    label = "SHADOW (not wagered; hypothetical)" if kinds == {"shadow"} else ("ACTUAL" if kinds == {"actual"} else "MIXED-INVALID")
++    if len(kinds) > 1:
++        raise ValueError("ledger mixes shadow and actual records; refusing to report")
++    label = "SHADOW (not wagered; hypothetical)" if kinds == {"shadow"} else ("ACTUAL" if kinds == {"actual"} else "EMPTY")
+     return {"ledger": label, "predictions": len(preds), "settled": len(sett), "wins": w, "losses": len(decided) - w,
+             "flat_units_per_bet": round(sum(s["units_per_unit_staked"] for s in decided) / len(decided), 4) if decided else None,
+             "by_tier": {t: sum(1 for p in preds.values() if p["tier"] == t) for t in TIERS},
++            "tier_validation": __import__("v13.tier_validation", fromlist=["validate_tiers"]).validate_tiers(ledger_bets(path)),
+             "clv_same_line": {"n": len(clv), "mean_prob_pts": round(100 * sum(clv) / len(clv), 3) if clv else None,
+                               "note": "positive = the closing price implied a higher win chance than the price we logged"}}
+diff --git a/v13/provenance.py b/v13/provenance.py
+new file mode 100644
+index 0000000..8bb3144
+--- /dev/null
++++ b/v13/provenance.py
+@@ -0,0 +1,101 @@
++"""Historical odds eligibility gate (quarantine) with explicit provenance. Fails closed.
++
++A price may enter a VALIDATED betting backtest or report only if:
++  1. its source is registered below (unknown source -> excluded),
++  2. the game's season is inside that source's documented coverage,
++  3. the source's quote timestamp field is present and parseable,
++  4. the game's scheduled tip time is known, and
++  5. the quote timestamp is strictly before tip (at/after tip -> excluded).
++A field named "opening" is never evidence of pre-tip availability by itself.
++
++Excluded rows are preserved (with an exclusion reason) for forensics; they are never deleted
++and never silently dropped into the eligible set. Eligibility depends on the source, so an
++independently verified source can be registered with its own documented coverage.
++"""
++from collections import Counter
++from datetime import datetime, timezone
++
++from v13.pricing import parse_utc
++
++GATE_VERSION = "odds-gate-1"
++
++# Documented coverage, per source. Seasons are BALLDONTLIE season labels (2025 = 2025-26).
++SOURCES = {
++    # OpenAPI: opening endpoints cover "the most recently completed season and ongoing seasons
++    # where available" -> as of 2026-10 that is 2025-26 and 2026-27. Forensics (run 38652187615)
++    # found 2023-24 and 2024-25 opening timestamps set exactly at tip.
++    "bdl_opening_game_odds": {"timestamp_field": "opened_at", "documented_seasons": {2025, 2026},
++                              "evidence": "BALLDONTLIE OpenAPI /nba/v2/odds/opening; forensics run 38652187615"},
++    "bdl_opening_player_props": {"timestamp_field": "opened_at", "documented_seasons": {2025, 2026},
++                                 "evidence": "BALLDONTLIE OpenAPI /nba/v2/odds/player_props/opening"},
++    # Our own logger: the capture time is ours, so any captured season counts.
++    "v13_live_logger": {"timestamp_field": "captured_at_utc", "documented_seasons": None,
++                        "evidence": "scripts/log_live_odds.py append-only snapshots"},
++}
++
++REASONS = ("ok", "unknown_source", "unknown_season", "season_outside_documented_coverage",
++           "missing_quote_timestamp", "missing_tip_time", "quote_at_or_after_tip")
++
++
++def assess(row, source, tip_utc, season):
++    """Return (eligible, reason) for one odds row."""
++    spec = SOURCES.get(source)
++    if spec is None:
++        return False, "unknown_source"
++    if season is None:
++        return False, "unknown_season"
++    if spec["documented_seasons"] is not None and int(season) not in spec["documented_seasons"]:
++        return False, "season_outside_documented_coverage"
++    ts = parse_utc(row.get(spec["timestamp_field"]))
++    if ts is None:
++        return False, "missing_quote_timestamp"
++    tip = tip_utc if isinstance(tip_utc, datetime) else parse_utc(tip_utc)
++    if tip is None:
++        return False, "missing_tip_time"
++    if ts >= tip:
++        return False, "quote_at_or_after_tip"
++    return True, "ok"
++
++
++def game_index(games):
++    """game_id -> (tip datetime or None, season or None) from a BALLDONTLIE game index."""
++    return {str(g["id"]): (parse_utc(g.get("datetime")), g.get("season")) for g in games if g.get("id") is not None}
++
++
++def quarantine(rows, games, source, now=None):
++    """Split rows into (eligible, excluded, summary). Every row gets a `_prov` stamp."""
++    idx = game_index(games)
++    checked = (now or datetime.now(timezone.utc)).isoformat()
++    eligible, excluded, reasons = [], [], Counter()
++    for r in rows:
++        tip, season = idx.get(str(r.get("game_id")), (None, None))
++        ok, reason = assess(r, source, tip, season)
++        stamped = {**r, "_prov": {"source": source, "season": season, "tip_utc": tip.isoformat() if tip else None,
++                                  "timestamp_field": SOURCES.get(source, {}).get("timestamp_field"),
++                                  "eligible": ok, "reason": reason, "gate_version": GATE_VERSION,
++                                  "checked_at_utc": checked}}
++        (eligible if ok else excluded).append(stamped)
++        reasons[reason] += 1
++    summary = {"source": source, "gate_version": GATE_VERSION, "rows": len(rows), "eligible": len(eligible),
++               "excluded": len(excluded), "reasons": dict(reasons),
++               "documented_seasons": sorted(SOURCES[source]["documented_seasons"])
++               if source in SOURCES and SOURCES[source]["documented_seasons"] else "all captured"}
++    return eligible, excluded, summary
++
++
++class UnverifiedOddsError(ValueError):
++    pass
++
++
++def require_eligible(rows, context="validated report"):
++    """Fail closed unless EVERY row carries a passing gate stamp."""
++    bad = [r for r in rows if not ((r.get("_prov") or {}).get("eligible") is True
++                                   and (r.get("_prov") or {}).get("gate_version") == GATE_VERSION)]
++    if bad:
++        reasons = Counter((r.get("_prov") or {}).get("reason", "no_provenance_stamp") for r in bad)
++        raise UnverifiedOddsError(f"{len(bad)} odds rows lack a passing {GATE_VERSION} stamp for {context}: {dict(reasons)}")
++    return rows
++
++
++def evidence_class(validated):
++    return "validated" if validated else "exploratory_unverified_prices"
+diff --git a/v13/tier_validation.py b/v13/tier_validation.py
+new file mode 100644
+index 0000000..a34cf16
+--- /dev/null
++++ b/v13/tier_validation.py
+@@ -0,0 +1,51 @@
++"""Do confidence tiers mean anything? One report for backtest ledgers and the prospective ledger.
++
++Input: bets with tier, price, outcome, p_market (de-vigged, optional), date, game_id.
++Per tier: n, hit rate (Wilson CI), mean break-even, excess over market with z, flat ROI.
++Ordering checks A < A+ < A++ on excess and ROI, each requiring >= min_n decided bets per tier.
++Also: qualified bets per month, and correlated (same-game multi-bet) vs single-bet results.
++"""
++import math
++from collections import Counter, defaultdict
++
++from v13.pricing import implied_probability, profit_per_unit, wilson
++
++ORDER = ("A", "A+", "A++")
++
++
++def _grade(rows):
++    d = [b for b in rows if b["outcome"] in ("win", "loss")]
++    n = len(d)
++    out = {"bets": len(rows), "decided": n}
++    if not n:
++        return out
++    w = sum(b["outcome"] == "win" for b in d)
++    out.update(hit_rate=round(w / n, 4), hit_95ci=wilson(w, n),
++               mean_breakeven=round(sum(implied_probability(b["price"]) for b in d) / n, 4),
++               roi_pct=round(100 * sum(profit_per_unit(b["price"]) if b["outcome"] == "win" else -1 for b in d) / n, 2))
++    m = [b for b in d if b.get("p_market") is not None]
++    if m:
++        exp = sum(b["p_market"] for b in m); var = sum(b["p_market"] * (1 - b["p_market"]) for b in m)
++        wm = sum(b["outcome"] == "win" for b in m)
++        out.update(excess=round((wm - exp) / len(m), 4), z=round((wm - exp) / math.sqrt(var), 2) if var else None)
++    return out
++
++
++def validate_tiers(bets, min_n=100):
++    tiers = {t: _grade([b for b in bets if b.get("tier") == t]) for t in ORDER}
++    stray = [b for b in bets if b.get("tier") not in ORDER]
++    ordered = {}
++    for key in ("excess", "roi_pct"):
++        vals = [tiers[t].get(key) for t in ORDER]
++        enough = all(tiers[t]["decided"] >= min_n for t in ORDER)
++        ordered[key] = ("insufficient_sample" if not enough else
++                        "increasing" if all(v is not None for v in vals) and vals[0] < vals[1] < vals[2] else "not_increasing")
++    per_game = Counter(str(b["game_id"]) for b in bets)
++    corr = {"single_bet_games": _grade([b for b in bets if per_game[str(b["game_id"])] == 1]),
++            "multi_bet_games": _grade([b for b in bets if per_game[str(b["game_id"])] > 1])}
++    monthly = Counter(str(b["date"])[:7] for b in bets if b.get("tier") in ORDER)
++    verdict = ("tiers_supported" if ordered["excess"] == ordered["roi_pct"] == "increasing"
++               else "use_flat_staking")
++    return {"by_tier": tiers, "ordering": ordered, "min_n_per_tier": min_n, "verdict": verdict,
++            "non_actionable_rows_present": len(stray), "qualified_per_month": dict(sorted(monthly.items())),
++            "correlation": corr, "all": _grade([b for b in bets if b.get("tier") in ORDER])}
+-- 
+2.43.0
+

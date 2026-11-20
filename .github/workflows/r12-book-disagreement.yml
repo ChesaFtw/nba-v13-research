@@ -1,0 +1,46 @@
+name: V13 R12 — sportsbook disagreement test (2025-26 gated opening props)
+on:
+  workflow_dispatch:
+  push:
+    paths: ['experiments/r12-book-disagreement.trigger']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  r12:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SEASON_RUN: '38642028905'
+      PROPS_2025_RUN: '38602363379'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Refuse to run unless the pre-registration is committed
+        run: test -f PREREG_R12_BOOK_DISAGREEMENT.md && git log --oneline -1 -- PREREG_R12_BOOK_DISAGREEMENT.md
+      - name: Inputs (saved artifacts; no API calls)
+        run: |
+          gh run download "$SEASON_RUN" -n v13-r3-season-2025 -D research_data
+          gh run download "$PROPS_2025_RUN" -n v13-full-opening-props-2025 -D in/props2025
+      - name: Provenance gate
+        run: |
+          python -u -m scripts.quarantine_odds --source bdl_opening_player_props --games research_data/game_history/games_2025.jsonl \
+            --odds "$(find in/props2025 -name opening_props_2025.jsonl | head -1)" --out gated/props_2025
+      - name: Frozen test
+        run: |
+          mkdir -p research_results/r12
+          python -u -m scripts.book_disagreement --props gated/props_2025/eligible.jsonl \
+            --stats research_data/regular_player_history/player_stats_regular_2025.jsonl \
+            --out research_results/r12/book_disagreement_2025.json
+          cp gated/props_2025/summary.json research_results/r12/gate_props_2025.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v13-r12-book-disagreement
+          path: research_results/r12/
+          retention-days: 90

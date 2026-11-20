@@ -1,0 +1,602 @@
+From 94148d65520d3d7e763c9823707a5e46dea2ae30 Mon Sep 17 00:00:00 2001
+From: Claude audit <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 17:36:51 -0500
+Subject: [PATCH] Round 8: odds-timestamp forensics, actionable-only selection
+ (no PASS / non-positive EV), leakage guards, rank-bucket and game-cluster
+ checks, hash-chained shadow/actual ledgers
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ scripts/odds_forensics.py | 155 ++++++++++++++++++++++++++++++++++++++
+ scripts/rank_and_stake.py |  57 ++++++++++++++
+ tests/test_round8.py      | 121 +++++++++++++++++++++++++++++
+ v13/ledger.py             | 134 ++++++++++++++++++++++++++++++++
+ v13/ranking.py            |  24 ++++--
+ 5 files changed, 485 insertions(+), 6 deletions(-)
+ create mode 100644 scripts/odds_forensics.py
+ create mode 100644 tests/test_round8.py
+ create mode 100644 v13/ledger.py
+
+diff --git a/scripts/odds_forensics.py b/scripts/odds_forensics.py
+new file mode 100644
+index 0000000..ac9ab95
+--- /dev/null
++++ b/scripts/odds_forensics.py
+@@ -0,0 +1,155 @@
++"""Odds-timestamp forensics: what does each historical odds timestamp actually mean?
++
++Samples games per season (stratified by month), pulls every vendor row from BOTH
++  /nba/v2/odds/opening      (field: opened_at — documented as "Opening odds timestamp")
++  /nba/v2/odds              (field: updated_at — documented as "Last update timestamp")
++and writes one row per (game, vendor, endpoint) with tip time, the timestamp, its offset
++from tip, and a mechanical classification. It never repairs or reinterprets timestamps.
++
++Classification of offset = timestamp - tip (hours), checked in this order:
++  missing_or_unparseable   no usable timestamp / no tip time
++  pregame                  offset < 0 (eligible for a pre-tip backtest)
++  in_game_window           0 <= offset <= 3       (consistent with live/in-play capture)
++  exact_hour_shift         offset in (3, 12] and within 2 min of a whole hour
++                           (consistent with a timezone error; flagged, NOT corrected)
++  same_or_next_day         3 < offset <= 36       (post-game update or late capture)
++  days_or_more_after       offset > 36            (consistent with ingestion/backfill time)
++
++Documented coverage (BALLDONTLIE OpenAPI, opening endpoints): "limited to the most recently
++completed season and ongoing seasons where available". Rows outside that are flagged.
++
++python -m scripts.odds_forensics --season 2023 --games games_2023.jsonl --season 2024 --games ... \
++  --season 2025 --games ... --per-season 30 --documented-seasons 2025,2026 --out research_results/forensics
++"""
++import argparse, csv, json, os, random, time
++from collections import Counter, defaultdict
++from pathlib import Path
++
++import numpy as np
++import requests
++
++from v13.pricing import parse_utc
++
++BASE = "https://api.balldontlie.io"
++ENDPOINTS = {"opening": ("/nba/v2/odds/opening", "opened_at"), "current": ("/nba/v2/odds", "updated_at")}
++
++
++def classify(offset_h):
++    if offset_h is None:
++        return "missing_or_unparseable"
++    if offset_h < 0:
++        return "pregame"
++    if offset_h <= 3:
++        return "in_game_window"
++    if offset_h <= 12 and abs(offset_h - round(offset_h)) * 60 <= 2:
++        return "exact_hour_shift"
++    if offset_h <= 36:
++        return "same_or_next_day"
++    return "days_or_more_after"
++
++
++def sample_games(games, n, seed=7):
++    """Up to n final regular-season games, spread evenly across months (deterministic)."""
++    games = [g for g in games if g.get("postseason") is False and g.get("status") == "Final"]
++    by_month = defaultdict(list)
++    for g in sorted(games, key=lambda g: (str(g["date"]), g["id"])):
++        by_month[str(g["date"])[:7]].append(g)
++    rng = random.Random(seed)
++    months = sorted(by_month)
++    out = []
++    for i in range(n):
++        bucket = by_month[months[i % len(months)]]
++        out.append(bucket[rng.randrange(len(bucket))])
++    seen, uniq = set(), []
++    for g in out:
++        if g["id"] not in seen:
++            seen.add(g["id"]); uniq.append(g)
++    return uniq
++
++
++def fetch(session, key, path, game_id):
++    for attempt in range(6):
++        r = session.get(BASE + path, params=[("game_ids[]", str(game_id)), ("per_page", "100")],
++                        headers={"Authorization": key}, timeout=40)
++        if r.status_code in (429, 500, 502, 503, 504):
++            time.sleep(5 * (attempt + 1)); continue
++        if r.status_code in (400, 404):
++            return [], f"http_{r.status_code}"
++        r.raise_for_status()
++        return r.json().get("data", []), "ok"
++    return [], "http_retry_exhausted"
++
++
++def rows_for_game(g, season, fetched, documented):
++    tip = parse_utc(g.get("datetime"))
++    out = []
++    for endpoint, (data, status) in fetched.items():
++        field = ENDPOINTS[endpoint][1]
++        if not data:
++            out.append({"season": season, "game_id": g["id"], "game_date": g["date"], "tip_utc": g.get("datetime"),
++                        "endpoint": endpoint, "vendor": None, "spread_home_value": None, "total_value": None,
++                        "timestamp_field": field, "timestamp": None, "offset_hours": None,
++                        "classification": f"no_rows_{status}", "pregame_eligible": False,
++                        "in_documented_coverage": season in documented})
++            continue
++        for r in data:
++            ts = parse_utc(r.get(field))
++            off = round((ts - tip).total_seconds() / 3600, 3) if ts and tip else None
++            cls = classify(off)
++            out.append({"season": season, "game_id": g["id"], "game_date": g["date"], "tip_utc": g.get("datetime"),
++                        "endpoint": endpoint, "vendor": r.get("vendor"), "spread_home_value": r.get("spread_home_value"),
++                        "total_value": r.get("total_value"), "timestamp_field": field, "timestamp": r.get(field),
++                        "offset_hours": off, "classification": cls,
++                        "pregame_eligible": cls == "pregame" and endpoint == "opening" and season in documented,
++                        "in_documented_coverage": season in documented})
++    return out
++
++
++def summarize(rows):
++    out = {}
++    for (season, endpoint) in sorted({(r["season"], r["endpoint"]) for r in rows}):
++        sub = [r for r in rows if r["season"] == season and r["endpoint"] == endpoint]
++        offs = [r["offset_hours"] for r in sub if r["offset_hours"] is not None]
++        whole = [o for o in offs if o > 0 and abs(o - round(o)) * 60 <= 2]
++        out[f"{season}|{endpoint}"] = {
++            "rows": len(sub), "games": len({r["game_id"] for r in sub}),
++            "classification": dict(Counter(r["classification"] for r in sub)),
++            "offset_hours_p5_p50_p95": np.percentile(offs, [5, 50, 95]).round(2).tolist() if offs else None,
++            "share_positive_offsets_on_whole_hours": round(len(whole) / max(1, sum(o > 0 for o in offs)), 3),
++            "pregame_eligible_rows": sum(r["pregame_eligible"] for r in sub),
++            "in_documented_coverage": sub[0]["in_documented_coverage"] if sub else None}
++    return out
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--season", type=int, action="append", required=True)
++    p.add_argument("--games", action="append", required=True)
++    p.add_argument("--per-season", type=int, default=30)
++    p.add_argument("--documented-seasons", default="2025,2026")
++    p.add_argument("--out", required=True)
++    a = p.parse_args()
++    key = os.environ.get("BALLDONTLIE_API_KEY")
++    if not key:
++        raise RuntimeError("BALLDONTLIE_API_KEY not set")
++    documented = {int(x) for x in a.documented_seasons.split(",") if x}
++    s = requests.Session(); rows = []
++    for season, path in zip(a.season, a.games):
++        games = [json.loads(x) for x in Path(path).open() if x.strip()]
++        for g in sample_games(games, a.per_season):
++            fetched = {ep: fetch(s, key, ENDPOINTS[ep][0], g["id"]) for ep in ENDPOINTS}
++            rows += rows_for_game(g, season, fetched, documented)
++            time.sleep(0.15)
++    out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
++    with (out / "odds_forensics_rows.csv").open("w", newline="") as f:
++        w = csv.DictWriter(f, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
++    summary = {"documented_seasons": sorted(documented),
++               "source_note": "BALLDONTLIE OpenAPI: opening endpoints cover 'the most recently completed season and "
++                              "ongoing seasons where available'; prop opened_at is described as 'last updated'.",
++               "by_season_endpoint": summarize(rows)}
++    (out / "odds_forensics_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
++    print(json.dumps(summary, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/rank_and_stake.py b/scripts/rank_and_stake.py
+index 2065269..b254566 100644
+--- a/scripts/rank_and_stake.py
++++ b/scripts/rank_and_stake.py
+@@ -45,6 +45,55 @@ def selection_calibration(chosen):
+ TARGETS = (100, 150, 200, 250, 300)
+ 
+ 
++def rank_buckets(val, test, edges=(0.01, 0.05, 0.20)):
++    """Does a higher rank mean a better bet? EV_lo cut points are fixed on VALIDATION quantiles,
++    then test candidates (decided, with market price) are bucketed and graded."""
++    import math
++    from v13.pricing import profit_per_unit
++    v = sorted((c["ev_lo"] for c in val), reverse=True)
++    if not v:
++        return None
++    cuts = [v[min(len(v) - 1, int(len(v) * e))] for e in edges]
++    names = [f"top_{int(100 * edges[0])}pct"] + [f"{int(100 * a)}-{int(100 * b)}pct" for a, b in zip(edges, edges[1:])] + ["rest"]
++    buckets = {n: [] for n in names}
++    for c in test:
++        if c["outcome"] not in ("win", "loss") or c.get("p_market") is None:
++            continue
++        i = next((k for k, cut in enumerate(cuts) if c["ev_lo"] >= cut), len(cuts))
++        buckets[names[i]].append(c)
++    out = {"validation_cutpoints_ev_lo": [round(x, 5) for x in cuts]}
++    for n, rows in buckets.items():
++        if not rows:
++            out[n] = {"n": 0}; continue
++        w = sum(c["outcome"] == "win" for c in rows); exp = sum(c["p_market"] for c in rows)
++        var = sum(c["p_market"] * (1 - c["p_market"]) for c in rows)
++        out[n] = {"n": len(rows), "mean_p": round(sum(c["p"] for c in rows) / len(rows), 4),
++                  "realized_hit": round(w / len(rows), 4), "market_hit": round(exp / len(rows), 4),
++                  "excess": round((w - exp) / len(rows), 4), "z": round((w - exp) / math.sqrt(var), 2) if var else None,
++                  "roi_pct": round(100 * sum(profit_per_unit(c["price"]) if c["outcome"] == "win" else -1 for c in rows) / len(rows), 2)}
++    return out
++
++
++def game_cluster_bootstrap_roi(bets, reps=2000, seed=5):
++    """95% CI for flat ROI resampling whole GAMES (correlated props move together)."""
++    import numpy as np
++    from v13.pricing import profit_per_unit
++    by = {}
++    for b in bets:
++        if b["outcome"] in ("win", "loss"):
++            by.setdefault(str(b["game_id"]), []).append(profit_per_unit(b["price"]) if b["outcome"] == "win" else -1.0)
++    groups = list(by.values())
++    if len(groups) < 10:
++        return None
++    rng = np.random.default_rng(seed)
++    rois = []
++    for _ in range(reps):
++        pick = [groups[i] for i in rng.integers(0, len(groups), len(groups))]
++        flat = [x for g in pick for x in g]
++        rois.append(100 * sum(flat) / len(flat))
++    return {"games": len(groups), "roi_95ci_pct": [round(float(np.percentile(rois, 2.5)), 2), round(float(np.percentile(rois, 97.5)), 2)]}
++
++
+ def read(path):
+     return [json.loads(x) for x in Path(path).open() if x.strip()]
+ 
+@@ -63,6 +112,10 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
+     else:
+         val = [c for c in scored if c.get("season") == validation_season]
+         test = [c for c in scored if c.get("season") == test_season]
++    if val and test and max(c["date"] for c in val) >= min(c["date"] for c in test):
++        raise AssertionError("validation window overlaps test window")
++    if val and test and {c["candidate_id"] for c in val} & {c["candidate_id"] for c in test}:
++        raise AssertionError("candidate appears in both validation and test")
+     if not val or not test:
+         # Never relabel seasons or borrow test months: report the gap and stop cleanly.
+         return {"status": "UNTESTABLE", "grouping": grouping,
+@@ -81,6 +134,7 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
+               "calibration_fits_last_period": fits[max(fits)],
+               "reliability_test": {m: reliability([c for c in test if c["market"] == m])
+                                    for m in sorted({c["market"] for c in test})},
++              "rank_buckets_test": rank_buckets(val, test),
+               "sweep": {}}
+     for n in targets:
+         tau = tau_for_target(val, max(1, round(n * scale)) if split_date else n)
+@@ -92,6 +146,9 @@ def run(candidates, validation_season=None, test_season=None, models=None, targe
+             "validation_count": len(select(val, tau)),
+             "test": {**{f"{st}": {k: v for k, v in r.items() if k != "ledger"} for st, r in sims.items()},
+                      **{f"monte_carlo_{st}": monte_carlo(r["ledger"], st, mc_paths) for st, r in sims.items()}},
++            "actionable_qualified_in_test": len(chosen),
++            "shortfall_vs_target": max(0, n - len(chosen)),
++            "game_cluster_roi_ci": game_cluster_bootstrap_roi(chosen),
+             "selected_bets_calibration_test": selection_calibration(chosen),
+             "selected_bets_calibration_validation": selection_calibration(select(val, tau)),
+             "sensitivity": {f"{st}_shrink_{k}": parametric_monte_carlo(chosen, k, st, max(1000, mc_paths // 2))
+diff --git a/tests/test_round8.py b/tests/test_round8.py
+new file mode 100644
+index 0000000..56f31cd
+--- /dev/null
++++ b/tests/test_round8.py
+@@ -0,0 +1,121 @@
++import json
++import random
++
++import pytest
++
++from scripts.odds_forensics import classify, rows_for_game, sample_games, summarize
++from v13 import ledger
++from v13.ranking import select, tau_for_target, walk_forward_score
++
++
++def test_forensic_classification():
++    assert classify(-5.0) == "pregame"
++    assert classify(1.5) == "in_game_window"
++    assert classify(5.0) == "exact_hour_shift"      # whole-hour offset after tip: possible timezone bug
++    assert classify(5.4) == "same_or_next_day"
++    assert classify(400.0) == "days_or_more_after"  # ingestion/backfill-like
++    assert classify(None) == "missing_or_unparseable"
++
++
++def test_forensic_rows_and_eligibility():
++    g = {"id": 9, "date": "2024-01-02", "datetime": "2024-01-03T00:30:00Z"}
++    fetched = {"opening": ([{"vendor": "dk", "opened_at": "2024-01-02T15:00:00Z", "spread_home_value": "-3"},
++                            {"vendor": "fd", "opened_at": "2025-06-01T00:00:00Z"}], "ok"),
++               "current": ([], "ok")}
++    rows = rows_for_game(g, 2024, fetched, documented={2025})
++    opening = [r for r in rows if r["endpoint"] == "opening"]
++    assert [r["classification"] for r in opening] == ["pregame", "days_or_more_after"]
++    assert not any(r["pregame_eligible"] for r in rows)  # 2024 outside documented coverage
++    rows25 = rows_for_game(g, 2025, fetched, documented={2025})
++    assert sum(r["pregame_eligible"] for r in rows25) == 1
++    assert summarize(rows25)["2025|opening"]["pregame_eligible_rows"] == 1
++
++
++def test_sample_games_is_deterministic_and_spread_over_months():
++    games = [{"id": i, "date": f"2025-{1 + i % 4:02d}-{1 + i % 27:02d}", "postseason": False, "status": "Final"} for i in range(200)]
++    a, b = sample_games(games, 8), sample_games(games, 8)
++    assert [g["id"] for g in a] == [g["id"] for g in b]
++    assert len({g["date"][:7] for g in a}) == 4
++
++
++def _scored(i, ev_lo, p_lo, day="2026-01-05"):
++    return {"candidate_id": str(i), "date": day, "game_id": f"g{i}", "player_id": None, "market": "m",
++            "price": -110, "p": p_lo + 0.01, "p_lo": p_lo, "ev": ev_lo + 0.01, "ev_lo": ev_lo, "p_market": 0.5,
++            "outcome": "win", "season": 2025}
++
++
++def test_pass_tier_and_nonpositive_ev_are_never_selected():
++    rows = [_scored(1, 0.05, 0.56), _scored(2, 0.004, 0.528), _scored(3, -0.01, 0.52), _scored(4, 0.0, 0.5238)]
++    chosen = select(rows, -1.0)
++    assert [c["candidate_id"] for c in chosen] == ["1"]
++    assert all(c["tier"] in ("A", "A+", "A++") for c in chosen)
++    assert tau_for_target(rows, 10) >= 0.0
++
++
++def test_walk_forward_fit_never_sees_scored_period():
++    rng = random.Random(2)
++    cands = []
++    for i in range(3000):
++        truth = rng.uniform(0.4, 0.6); w = rng.random() < truth
++        cands.append({"candidate_id": str(i), "season": 2025, "date": f"2026-{1 + i // 600:02d}-{1 + i % 28:02d}",
++                      "game_id": str(i), "player_id": None, "market": "m", "side": "over", "line": 1.5, "price": -110,
++                      "opp_price": -110, "p_model": truth, "outcome": "win" if w else "loss", "model_version": "v"})
++    _, fits = walk_forward_score(cands)
++    for per, f in fits.items():
++        for v in f.values():
++            if v.get("train_max_date"):
++                assert v["train_max_date"] < v["scored_period_start"]
++
++
++def test_rank_and_stake_rejects_overlapping_windows():
++    from scripts.rank_and_stake import run
++    rng = random.Random(4)
++    cands = []
++    for i in range(2000):
++        truth = rng.uniform(0.4, 0.6); w = rng.random() < truth
++        cands.append({"candidate_id": str(i), "season": 2025 if i % 2 else 2024, "date": f"2026-{1 + i // 400:02d}-{1 + i % 28:02d}",
++                      "game_id": str(i), "player_id": None, "market": "m", "side": "over", "line": 1.5, "price": -110,
++                      "opp_price": -110, "p_model": truth, "outcome": "win" if w else "loss", "model_version": "v"})
++    with pytest.raises(AssertionError):
++        run(cands, validation_season=2024, test_season=2025, targets=(10,), mc_paths=50)
++
++
++PRED = {"prediction_id": "p1", "predicted_at_utc": "2026-11-01T18:00:00Z", "tip_utc": "2026-11-02T00:00:00Z",
++        "game_id": 1, "market": "prop_rebounds", "side": "over", "line": 8.5, "price": -110, "opp_price": -110,
++        "sportsbook": "draftkings", "p_model": 0.56, "p_market": 0.5, "ev": 0.07, "tier": "A",
++        "stake_pct_of_bankroll": 0.01, "model_version": "v", "git_commit": "abc", "source": "live_logger"}
++
++
++def test_ledger_chain_rules_and_tamper_detection(tmp_path):
++    path = tmp_path / "shadow.jsonl"
++    from datetime import datetime, timezone
++    now = datetime(2026, 11, 1, 19, tzinfo=timezone.utc)
++    ledger.append_prediction(path, PRED, "shadow", now=now)
++    with pytest.raises(ValueError):
++        ledger.append_prediction(path, {**PRED, "prediction_id": "p2", "tier": "pass"}, "shadow", now=now)
++    with pytest.raises(ValueError):  # after tip
++        ledger.append_prediction(path, {**PRED, "prediction_id": "p3", "predicted_at_utc": "2026-11-02T01:00:00Z"}, "shadow",
++                                 now=datetime(2026, 11, 2, 2, tzinfo=timezone.utc))
++    with pytest.raises(ValueError):  # shadow cannot claim a placed bet
++        ledger.append_prediction(path, {**PRED, "prediction_id": "p4", "confirmed_price": -110, "stake_amount": 100,
++                                        "bet_reference": "x"}, "shadow", now=now)
++    ledger.append_close(path, "p1", 8.5, -125, 105, "2026-11-01T23:55:00Z", "live_logger")
++    ledger.append_settlement(path, "p1", "win", "2026-11-02T03:00:00Z", "box_score")
++    rep = ledger.report(path)
++    assert rep["ledger"].startswith("SHADOW") and rep["wins"] == 1 and rep["clv_same_line"]["mean_prob_pts"] > 0
++    assert ledger.verify(path) == 3
++    lines = path.read_text().splitlines()
++    rec = json.loads(lines[0]); rec["price"] = 150; lines[0] = json.dumps(rec)
++    path.write_text("\n".join(lines) + "\n")
++    with pytest.raises(ValueError):
++        ledger.verify(path)
++
++
++def test_actual_ledger_requires_confirmation(tmp_path):
++    from datetime import datetime, timezone
++    now = datetime(2026, 11, 1, 19, tzinfo=timezone.utc)
++    with pytest.raises(ValueError):
++        ledger.append_prediction(tmp_path / "actual.jsonl", PRED, "actual", now=now)
++    ok = ledger.append_prediction(tmp_path / "actual.jsonl", {**PRED, "confirmed_price": -115, "stake_amount": 100.0,
++                                                               "bet_reference": "ticket-1"}, "actual", now=now)
++    assert ok["ledger_kind"] == "actual"
+diff --git a/v13/ledger.py b/v13/ledger.py
+new file mode 100644
+index 0000000..db49ac6
+--- /dev/null
++++ b/v13/ledger.py
+@@ -0,0 +1,134 @@
++"""Append-only, hash-chained prediction ledgers: SHADOW (logged, not wagered) and ACTUAL (placed).
++
++Every line is one JSON record with prev_hash and record_hash = sha256(prev_hash + canonical body),
++so any edit, deletion or reordering of an earlier line breaks verification. Records are never
++updated: closing lines and settlements are separate records that reference a prediction_id.
++
++Record kinds
++  prediction  written BEFORE tip; carries the full decision (line, price, probabilities, EV, tier, stake%)
++  close       closing quote for that prediction (from the live logger), written after tip
++  settlement  outcome and P&L, written after the game is final
++Shadow and actual ledgers are separate files; an ACTUAL prediction must carry bet confirmation
++fields, and a shadow ledger refuses them, so shadow returns can never be reported as money won.
++"""
++import hashlib, json
++from datetime import datetime, timezone
++from pathlib import Path
++
++from v13.pricing import no_vig_pair, parse_utc, profit_per_unit
++
++GENESIS = "0" * 64
++PREDICTION_FIELDS = ("prediction_id", "predicted_at_utc", "tip_utc", "game_id", "market", "side", "line", "price",
++                     "opp_price", "sportsbook", "p_model", "p_market", "ev", "tier", "stake_pct_of_bankroll",
++                     "model_version", "git_commit", "source")
++ACTUAL_ONLY = ("confirmed_price", "stake_amount", "bet_reference")
++TIERS = ("A", "A+", "A++")
++
++
++def _canonical(body):
++    return json.dumps(body, sort_keys=True, separators=(",", ":"))
++
++
++def _hash(prev, body):
++    return hashlib.sha256((prev + _canonical(body)).encode()).hexdigest()
++
++
++def read(path):
++    p = Path(path)
++    return [json.loads(x) for x in p.open() if x.strip()] if p.exists() else []
++
++
++def verify(path):
++    """Raise ValueError at the first broken link; return the number of valid records."""
++    prev = GENESIS
++    for i, rec in enumerate(read(path)):
++        body = {k: v for k, v in rec.items() if k not in ("prev_hash", "record_hash")}
++        if rec.get("prev_hash") != prev or rec.get("record_hash") != _hash(prev, body):
++            raise ValueError(f"ledger chain broken at record {i}")
++        prev = rec["record_hash"]
++    return i + 1 if prev != GENESIS else 0
++
++
++def _append(path, body):
++    records = read(path)
++    verify(path)
++    prev = records[-1]["record_hash"] if records else GENESIS
++    rec = {**body, "prev_hash": prev, "record_hash": _hash(prev, body)}
++    Path(path).parent.mkdir(parents=True, exist_ok=True)
++    with Path(path).open("a") as f:
++        f.write(_canonical(rec) + "\n")
++    return rec
++
++
++def append_prediction(path, pred, kind="shadow", now=None):
++    missing = [k for k in PREDICTION_FIELDS if pred.get(k) is None]
++    if missing:
++        raise ValueError(f"missing prediction fields: {missing}")
++    if pred["tier"] not in TIERS:
++        raise ValueError("only A/A+/A++ selections are recorded as predictions (PASS is never a recommendation)")
++    if not 0 < float(pred["stake_pct_of_bankroll"]) <= 0.03:
++        raise ValueError("stake must be a fraction of current bankroll in (0, 0.03]")
++    stamped, tip = parse_utc(pred["predicted_at_utc"]), parse_utc(pred["tip_utc"])
++    now = now or datetime.now(timezone.utc)
++    if stamped is None or tip is None or not stamped < tip:
++        raise ValueError("prediction must be timestamped before tip")
++    if stamped > now:
++        raise ValueError("prediction timestamp is in the future")
++    has_actual = any(pred.get(k) is not None for k in ACTUAL_ONLY)
++    if kind == "shadow" and has_actual:
++        raise ValueError("shadow ledger cannot carry bet confirmation fields")
++    if kind == "actual" and not all(pred.get(k) is not None for k in ACTUAL_ONLY):
++        raise ValueError(f"actual ledger requires {ACTUAL_ONLY}")
++    if any(r.get("record") == "prediction" and r["prediction_id"] == pred["prediction_id"] for r in read(path)):
++        raise ValueError("duplicate prediction_id")
++    return _append(path, {"record": "prediction", "ledger_kind": kind,
++                          "logged_at_utc": now.isoformat(), **{k: pred.get(k) for k in PREDICTION_FIELDS + ACTUAL_ONLY}})
++
++
++def _prediction(path, pid):
++    for r in read(path):
++        if r.get("record") == "prediction" and r["prediction_id"] == pid:
++            return r
++    raise ValueError(f"unknown prediction_id {pid}")
++
++
++def append_close(path, pid, close_line, close_price, close_opp_price, observed_at_utc, source):
++    pred = _prediction(path, pid)
++    if parse_utc(observed_at_utc) is None:
++        raise ValueError("close needs an observed_at_utc")
++    return _append(path, {"record": "close", "prediction_id": pid, "close_line": close_line, "close_price": close_price,
++                          "close_opp_price": close_opp_price, "observed_at_utc": observed_at_utc, "source": source,
++                          "ledger_kind": pred["ledger_kind"]})
++
++
++def append_settlement(path, pid, outcome, settled_at_utc, source):
++    pred = _prediction(path, pid)
++    if outcome not in ("win", "loss", "push", "void"):
++        raise ValueError("bad outcome")
++    if any(r.get("record") == "settlement" and r["prediction_id"] == pid for r in read(path)):
++        raise ValueError("already settled")
++    price = pred["confirmed_price"] if pred["ledger_kind"] == "actual" else pred["price"]
++    units = profit_per_unit(price) if outcome == "win" else (-1.0 if outcome == "loss" else 0.0)
++    return _append(path, {"record": "settlement", "prediction_id": pid, "outcome": outcome, "units_per_unit_staked": units,
++                          "settled_at_utc": settled_at_utc, "source": source, "ledger_kind": pred["ledger_kind"]})
++
++
++def report(path):
++    """Summary that labels itself with the ledger kind; shadow results are never called profit."""
++    recs = read(path); verify(path)
++    preds = {r["prediction_id"]: r for r in recs if r["record"] == "prediction"}
++    sett = {r["prediction_id"]: r for r in recs if r["record"] == "settlement"}
++    kinds = {r["ledger_kind"] for r in preds.values()}
++    decided = [s for s in sett.values() if s["outcome"] in ("win", "loss")]
++    w = sum(s["outcome"] == "win" for s in decided)
++    clv = []
++    for c in (r for r in recs if r["record"] == "close"):
++        p = preds.get(c["prediction_id"])
++        if p and c.get("close_opp_price") is not None and float(c["close_line"]) == float(p["line"]):
++            clv.append(no_vig_pair(c["close_price"], c["close_opp_price"])[0] - no_vig_pair(p["price"], p["opp_price"])[0])
++    label = "SHADOW (not wagered; hypothetical)" if kinds == {"shadow"} else ("ACTUAL" if kinds == {"actual"} else "MIXED-INVALID")
++    return {"ledger": label, "predictions": len(preds), "settled": len(sett), "wins": w, "losses": len(decided) - w,
++            "flat_units_per_bet": round(sum(s["units_per_unit_staked"] for s in decided) / len(decided), 4) if decided else None,
++            "by_tier": {t: sum(1 for p in preds.values() if p["tier"] == t) for t in TIERS},
++            "clv_same_line": {"n": len(clv), "mean_prob_pts": round(100 * sum(clv) / len(clv), 3) if clv else None,
++                              "note": "positive = the closing price implied a higher win chance than the price we logged"}}
+diff --git a/v13/ranking.py b/v13/ranking.py
+index 3e17258..1379187 100644
+--- a/v13/ranking.py
++++ b/v13/ranking.py
+@@ -125,11 +125,14 @@ def walk_forward_score(candidates, refit="month", grouping="market", **cal_kwarg
+     for per in periods:
+         start = min(c["date"] for c in cands if period(c["date"]) == per)
+         past = [c for c in cands if c["date"] < start]
++        if past and max(c["date"] for c in past) >= start:  # structural leakage guard
++            raise AssertionError("calibration window overlaps the scored period")
+         bymarket = defaultdict(list)
+         for c in past:
+             bymarket[key(c)].append(c)
+         cals = {m: Calibrator(**cal_kwargs).fit(rows) for m, rows in bymarket.items()}
+-        fits[per] = {f"{m}|{v}": cal.describe() for (m, v), cal in cals.items()}
++        fits[per] = {f"{m}|{v}": {**cal.describe(), "train_max_date": max((c["date"] for c in bymarket[(m, v)]), default=None),
++                                   "scored_period_start": start} for (m, v), cal in cals.items()}
+         for c in cands:
+             if period(c["date"]) != per:
+                 continue
+@@ -156,8 +159,14 @@ def kelly_tier(c, divisor=4.0):
+     return 0.0, "pass"
+ 
+ 
+-def select(scored, tau, per_game=2, per_player_game=1, daily_exposure=0.06, unit=0.01):
+-    """Greedy by ev_lo within each day, subject to correlation and exposure limits."""
++def select(scored, tau, per_game=2, per_player_game=1, daily_exposure=0.06, unit=0.01, allow_pass=False):
++    """Greedy by ev_lo within each day, subject to correlation and exposure limits.
++
++    Only actionable bets are ever selected: conservative EV must be strictly positive and the
++    quarter-Kelly tier must be A/A+/A++. A PASS-tier candidate is never a selection (and is never
++    staked at a 1% floor). allow_pass=True exists only for diagnostics and must not feed reports.
++    """
++    tau = max(tau, 0.0) if not allow_pass else tau
+     chosen = []
+     byday = defaultdict(list)
+     for c in scored:
+@@ -166,10 +175,13 @@ def select(scored, tau, per_game=2, per_player_game=1, daily_exposure=0.06, unit
+         games, player_games, game_markets = Counter(), Counter(), set()
+         exposure = 0.0
+         for c in sorted(byday[day], key=lambda c: -c["ev_lo"]):
+-            if c["ev_lo"] < tau:
++            if c["ev_lo"] < tau or (not allow_pass and c["ev_lo"] <= 0):
+                 break
+             stake, tier = kelly_tier(c)
+-            stake = max(stake, unit)
++            if tier == "pass":
++                if not allow_pass:
++                    continue
++                stake = unit
+             gm = (str(c["game_id"]), c["market"], str(c.get("player_id")))
+             if gm in game_markets or games[str(c["game_id"])] >= per_game:
+                 continue
+@@ -252,7 +264,7 @@ def summarize(led, worst_streak=None):
+             "longest_losing_streak": worst_streak, "by_tier": tiers, "by_market": markets, "ledger": led}
+ 
+ 
+-def tau_for_target(scored, target, lo=-0.05, hi=0.30, iters=40, **kw):
++def tau_for_target(scored, target, lo=0.0, hi=0.30, iters=40, **kw):
+     """Smallest EV_lo cutoff whose selection count on `scored` does not exceed target."""
+     if len(select(scored, lo, **kw)) <= target:
+         return lo
+-- 
+2.43.0
+

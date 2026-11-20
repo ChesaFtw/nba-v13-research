@@ -1,0 +1,1368 @@
+From 8fd0f8898d7cc06ec863e6c15561970b4d86e466 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 22:57:51 -0500
+Subject: [PATCH] Round 14: threes attempts x conversion, rebound
+ opportunity/share GLM with opponent-size interactions, tracking collection +
+ coverage gate, R13 threes diagnosis, 2024-25 replication, vacated audit,
+ frozen 2026-27 shadow recipe
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01X3eMLVywyLbsMErb6Tv9jS
+---
+ PREREG_R14_THREES_REBOUNDS.md |  91 ++++++
+ scripts/collect_tracking.py   | 142 +++++++++
+ scripts/r14_research.py       | 558 ++++++++++++++++++++++++++++++++++
+ tests/test_round14.py         | 235 ++++++++++++++
+ v13/r14_features.py           | 194 ++++++++++++
+ v13/r14_models.py             |  84 +++++
+ 6 files changed, 1304 insertions(+)
+ create mode 100644 PREREG_R14_THREES_REBOUNDS.md
+ create mode 100644 scripts/collect_tracking.py
+ create mode 100644 scripts/r14_research.py
+ create mode 100644 tests/test_round14.py
+ create mode 100644 v13/r14_features.py
+ create mode 100644 v13/r14_models.py
+
+diff --git a/PREREG_R14_THREES_REBOUNDS.md b/PREREG_R14_THREES_REBOUNDS.md
+new file mode 100644
+index 0000000..cc52084
+--- /dev/null
++++ b/PREREG_R14_THREES_REBOUNDS.md
+@@ -0,0 +1,91 @@
++# Pre-registration — R14 three-pointers and rebounds
++
++Frozen before any R14 result is seen.
++- **Code:** `v13/r14_features.py`, `v13/r14_models.py`, `scripts/r14_research.py` (constants `FOLDS`, `TESTS`, `TRACKING_TESTS`, `GATE`, `REB_PHYS`, `REB_OTHER`, `SHADOW_THRESHOLD`) and `scripts/collect_tracking.py`.
++- **Workflow:** `r14-research.yml`.
++
++## Status of the R13 threes PASS going in
++- **The PASS:** R13 `threes|model_edge` (minutes model × EWMA 3PM-per-minute → negative binomial, vs the power-de-vigged opening price) improved test-window log loss by 0.001371 and passed BH, the sign check and the CI rule.
++- **Its weakness:** it was one of 25 tests on the same 2025-26 window. There is **no untouched historical test period left** for 2025-26 prices.
++- **Therefore:** R14 *explains* it on that window (descriptive), *replicates* it on 2024-25 (unverified prices, exploratory), and *freezes* it for prospective 2026-27 confirmation.
++
++## Data
++- **Box scores** 2023-24, 2024-25, 2025-26 (played rows) and the game index.
++- **Prices:** gated 2025-26 opening props (fails closed). The 2024-25 opening props (quarantined) are used only for the exploratory replication.
++- **Tracking:** `/nba/v2/stats/advanced` full seasons collected by `collect_tracking.py`. Period-0 rows only. Used **only as lagged prior-game features** and **only if the gate passes**.
++
++## Features (strictly earlier days; see module docstrings)
++**Threes:**
++- 3PA per minute (EWMA, half-life 10);
++- 3P% shrunk to the league-to-date rate with K = 150 attempts;
++- hot_gap (last-5 3P% − shrunk, ≥ 10 attempts);
++- attempt_trend (last-5 − last-20 3PA/min);
++- vacated_ast.
++
++**Rebounds:**
++- expected defensive and offensive rebound opportunities (averages of opponent and own misses, last 10);
++- DREB and OREB share per opportunity-minute (EWMA, shrunk to the position mean with K = 5 games);
++- opp_oreb_rate, vacated_reb, opp_fg3a_rate, b2b, 3-in-4;
++- **physical terms:** opponent minutes-weighted size (centered), × expected misses, × the player's height, × projected minutes.
++
++  The player's own height is constant, so his share history absorbs it. Only the opponent-size part of "height advantage" varies by game, and that is what the GLM estimates. The "height advantage × misses × minutes" interaction is the model's structure: rebounds ∝ minutes × opportunities × share × exp(physical terms).
++
++**Tracking (if gated in):**
++- rebound chances per minute (EWMA);
++- conversion = REB / chances, shrunk to the league rate with K = 30.
++
++## Part A — prediction only (no prices), walk-forward
++- **Folds:** train 2023-24 → test 2024-25; train 2023-24 + 2024-25 → test 2025-26. The minutes model is refit per fold.
++- **Comparisons:**
++
++  | Comparison | Model | Against |
++  |---|---|---|
++  | Threes | V1 = NB attempts (μ = predicted min × 3PA/min) × Binomial(shrunk 3P%) | V0 = the R13 model |
++  | Rebounds | GLM: Poisson IRLS with offset log(predicted min/48 × (opps_d × share_d + opps_o × share_o)), ridge 1, NB dispersion | B0 = R13 minutes × EWMA rebound rate |
++  | Physical ablation | GLM with the four physical terms | GLM without them |
++  | Tracking (if gated) | chances model | GLM |
++
++- **Metric:** mean NB / compound log score of the actual stat, game-cluster bootstrap CI. MAE is reported too.
++- **PASS:** CI lower bound > 0 **in both folds**.
++
++## Part B — information beyond the de-vigged 2025-26 opening price (screening)
++- **Harness:** same as R13, generalized to an incremental baseline. Logistic on logit(price) + base features, then + the tested feature. Train before 2026-02-01, test after, game-cluster bootstrap.
++- **Tests:**
++
++  | # | Market | Feature | Baseline adds |
++  |---|---|---|---|
++  | 1 | threes | edge_v1 | — |
++  | 2 | threes | edge_v1 | edge_v0 |
++  | 3 | threes | attempt_trend | — |
++  | 4 | threes | hot_gap | — |
++  | 5 | threes | vacated_ast | — |
++  | 6 | rebounds | edge_struct | — |
++  | 7 | rebounds | edge_struct | edge_b0 |
++  | 8 | rebounds | vacated_reb | — |
++
++  Plus, only if the tracking gate passes: rebounds edge_track; rebounds edge_track beyond edge_struct.
++- **PASS:** Δ < 0, 95% CI upper bound < 0, BH q = 0.10 across all R14 tests run, and sign stable across the two training halves. Brier scores are reported too.
++- **Cumulative screening on this window:** R11 11 + R12 2 + R13 12 + R14 8–10. A PASS here is a candidate for prospective confirmation, nothing more.
++
++## Tracking coverage gate (frozen)
++Tracking tests run only if, for **each** of 2023-24, 2024-25 and 2025-26:
++- ≥ 90% of box-score player-games with ≥ 10 minutes have a non-null period-0 `rebound_chances_total`;
++- the period-sum consistency for that field is ≥ 95% wherever period rows exist.
++
++Otherwise tracking is reported as untestable for this design. It is **never** backfilled with season aggregates.
++
++## Descriptive only (cannot pass or fail anything)
++- **R13 threes diagnosis**, by: line, model direction, predicted minutes, projected attempts, month, vendor. Edge deciles with hit rate and opening-price ROI toward the model.
++- **2024-25 replication** (exploratory, models trained on 2023-24 only).
++- **Vacated-minutes audit:** same-night returns, trade phantoms, never-reappeared.
++- **Tracking manifests:** coverage by field and month, period consistency, duplicates, HTTP status / 429s / back-off, elapsed time.
++
++## Frozen 2026-27 shadow recipe (R13 threes)
++- **Recipe:** the minutes model and threes dispersion are refit on 2023-24..2025-26. The recalibration (intercept, market logit, edge z) is fit on all 2025-26 threes rows. Both are written to the artifact before any 2026-27 game.
++- **Decision rule (shadow only, flat 1 unit):** bet toward the recalibrated probability when |p_recal − p_devig| ≥ 0.03, at the price the logger observed at the daily scan time.
++- **Shadow success (judged at ≥ 300 shadow bets):**
++  - closing-line value > 0 with game-cluster CI lower bound > 0;
++  - prospective log-loss Δ < 0 with CI upper bound < 0.
++
++  ROI at captured prices is reported but is not the criterion at this sample size.
++- **No real stake** before shadow success. Then flat 1% (tier A) only.
+diff --git a/scripts/collect_tracking.py b/scripts/collect_tracking.py
+new file mode 100644
+index 0000000..8e07ded
+--- /dev/null
++++ b/scripts/collect_tracking.py
+@@ -0,0 +1,142 @@
++"""Collect /nba/v2/stats/advanced for one season and audit it before anything uses it.
++
++Writes  tracking_<season>.jsonl   period-0 (full-game) rows only, every field kept
++        manifest_<season>.json    the coverage audit:
++          requests, HTTP status counts, 429s and total back-off seconds, elapsed time, pages, rows by period
++          per-field non-null share of period-0 rows, overall and by month
++          period_consistency: for count fields, share of player-games whose period rows sum to the
++            period-0 value (within 1), where period rows exist
++          duplicates: repeated (game, player, period) keys
++Usability is decided by the R14 coverage gate, not by "the endpoint responded".
++Timing caveat recorded in the manifest: values are post-game and may have been revised by the NBA
++after the fact; they are only used as LAGGED (prior-game) features.
++"""
++import argparse, json, os, time
++from collections import Counter, defaultdict
++from pathlib import Path
++
++URL = "https://api.balldontlie.io/nba/v2/stats/advanced"
++CHECK = ("rebound_chances_total", "touches", "passes", "box_outs", "contested_fga")
++
++
++class Auditor:
++    """Streaming audit: period-0 rows go straight to `sink`; only small aggregates stay in memory."""
++
++    def __init__(self, sink=None):
++        self.sink = sink
++        self.by_period = Counter(); self.keys = Counter(); self.p0 = 0
++        self.nonnull = Counter(); self.fields = set()
++        self.month_n = Counter(); self.month_nonnull = defaultdict(Counter)
++        self.sums = defaultdict(lambda: defaultdict(float)); self.seen = defaultdict(set)
++        self.full_vals = {}
++
++    def add(self, r):
++        gid = str((r.get("game") or {}).get("id", r.get("game_id")))
++        pid = str((r.get("player") or {}).get("id", r.get("player_id")))
++        per = r.get("period")
++        self.by_period[str(per)] += 1
++        self.keys[(gid, pid, str(per))] += 1
++        if per in (0, None):
++            self.p0 += 1
++            m = str((r.get("game") or {}).get("date", ""))[:7]
++            self.month_n[m] += 1
++            for k, v in r.items():
++                if isinstance(v, dict):
++                    continue
++                self.fields.add(k)
++                if v is not None:
++                    self.nonnull[k] += 1
++                    if k in CHECK:
++                        self.month_nonnull[m][k] += 1
++            self.full_vals[(gid, pid)] = {f: r.get(f) for f in CHECK}
++            if self.sink is not None:
++                self.sink(r)
++        else:
++            for f in CHECK:
++                if r.get(f) is not None:
++                    self.sums[(gid, pid)][f] += float(r[f]); self.seen[(gid, pid)].add(f)
++
++    def finish(self):
++        cons = {}
++        for f in CHECK:
++            ok = tot = 0
++            for k, vals in self.full_vals.items():
++                if f in self.seen.get(k, ()) and vals.get(f) is not None:
++                    tot += 1; ok += abs(self.sums[k][f] - float(vals[f])) <= 1.0
++            cons[f] = round(ok / tot, 4) if tot else None
++        n = self.p0 or 1
++        return {"rows_by_period": dict(self.by_period), "period0_rows": self.p0,
++                "duplicate_keys": sum(1 for v in self.keys.values() if v > 1),
++                "field_nonnull_period0": {k: round(self.nonnull[k] / n, 4) for k in sorted(self.fields)},
++                "key_fields_by_month": {m: {f: round(self.month_nonnull[m][f] / c, 4) for f in CHECK}
++                                        for m, c in sorted(self.month_n.items())},
++                "period_consistency": cons}
++
++
++def audit(all_rows):
++    """Convenience wrapper (tests): -> (period-0 rows, audit dict)."""
++    full = []
++    a = Auditor(full.append)
++    for r in all_rows:
++        a.add(r)
++    return full, a.finish()
++
++
++def main():
++    import requests
++    p = argparse.ArgumentParser()
++    p.add_argument("--season", type=int, required=True)
++    p.add_argument("--out", required=True)
++    p.add_argument("--max-pages", type=int, default=4000)
++    p.add_argument("--sleep", type=float, default=0.25)
++    a = p.parse_args()
++    key = os.environ.get("BALLDONTLIE_API_KEY")
++    if not key:
++        raise SystemExit("BALLDONTLIE_API_KEY missing")
++    s = requests.Session()
++    out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
++    fh = (out / f"tracking_{a.season}.jsonl").open("w")
++    aud = Auditor(lambda r: fh.write(json.dumps(r, separators=(",", ":")) + "\n"))
++    raw, status, backoff, cursor, pages, seen_cursors = 0, Counter(), 0.0, None, 0, set()
++    t0 = time.time()
++    for _ in range(a.max_pages):
++        params = {"seasons[]": a.season, "per_page": 100}
++        if cursor is not None:
++            params["cursor"] = cursor
++        for attempt in range(8):
++            try:
++                r = s.get(URL, headers={"Authorization": key}, params=params, timeout=60)
++            except requests.RequestException:
++                status["network_error"] += 1; time.sleep(10 * (attempt + 1)); continue
++            status[str(r.status_code)] += 1
++            if r.status_code in (429, 500, 502, 503, 504):
++                try:
++                    wait = min(120.0, max(1.0, float(r.headers.get("Retry-After", ""))))
++                except ValueError:
++                    wait = min(120.0, 10.0 * (attempt + 1))
++                backoff += wait; time.sleep(wait); continue
++            break
++        r.raise_for_status()
++        body = r.json(); pages += 1
++        for row in body.get("data", []):
++            aud.add(row); raw += 1
++        cursor = (body.get("meta") or {}).get("next_cursor")
++        if cursor is None:
++            break
++        if str(cursor) in seen_cursors:
++            raise SystemExit("repeated cursor")
++        seen_cursors.add(str(cursor))
++        if pages % 100 == 0:
++            print(f"season {a.season}: pages={pages} rows={raw} elapsed={time.time() - t0:.0f}s", flush=True)
++        time.sleep(a.sleep)
++    fh.close()
++    manifest = {"season": a.season, "source": URL, "complete": cursor is None, "pages": pages, "raw_rows": raw,
++                "requests_by_status": dict(status), "backoff_seconds": round(backoff, 1),
++                "elapsed_seconds": round(time.time() - t0, 1), **aud.finish(),
++                "timing_caveat": "Post-game values, possibly revised after the fact; use only as lagged prior-game features."}
++    (out / f"manifest_{a.season}.json").write_text(json.dumps(manifest, indent=2) + "\n")
++    print(json.dumps({k: v for k, v in manifest.items() if k not in ("field_nonnull_period0", "key_fields_by_month")}, indent=2))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/r14_research.py b/scripts/r14_research.py
+new file mode 100644
+index 0000000..4abb83e
+--- /dev/null
++++ b/scripts/r14_research.py
+@@ -0,0 +1,558 @@
++"""Round 14 (pre-registered in PREREG_R14_THREES_REBOUNDS.md): three-pointers and rebounds.
++
++1. R13 reproduction and diagnosis of the threes PASS (descriptive; the same window cannot confirm it).
++2. Part A — prediction only, no prices, walk-forward folds (train 2023 -> test 2024; train 2023+2024 -> test 2025):
++   threes: attempts x shrunk conversion (V1) vs R13 minutes x 3PM-rate (V0), by log score of actual 3PM;
++   rebounds: opportunity -> share -> GLM (with height x misses x minutes interactions) vs R13 baseline,
++   and the GLM with vs without the physical terms (does height carry predictive value at all?).
++3. Part B — information beyond the de-vigged 2025-26 opening price (screening; BH across R14 tests).
++4. Replication of the R13 threes edge on 2024-25 opening props (quarantined prices: exploratory only).
++5. Vacated-minutes audit (trades, same-night returns, long absences).
++6. Tracking tests run only if the frozen coverage gate passes.
++"""
++import argparse, json, math
++from collections import Counter, defaultdict
++from pathlib import Path
++
++import numpy as np
++
++from scripts.backtest_prop_holdout import ALIASES, VENDORS
++from scripts.feature_info_test import BOOT, FDR_Q, benjamini_hochberg, fit_logistic, loglik_terms, logit
++from v13.minutes_model import MinutesModel, nb_over_prob
++from v13.minutes_model import build as build_minutes
++from v13.pricing import power_devig_pair, profit_per_unit, prop_prices
++from v13.provenance import require_eligible
++from v13.r14_features import build as build_r14
++from v13.r14_models import PoissonGLM, nb_dispersion, nb_logpmf, threes_logpmf, threes_over_prob
++
++SPLIT_2025 = "2026-02-01"
++SPLIT_2024 = "2025-02-01"
++FOLDS = {"fold_2024": ((2023,), 2024), "fold_2025": ((2023, 2024), 2025)}
++REB_PHYS = ("opp_size", "osz_x_oppmiss", "osz_x_height", "osz_x_min")
++REB_OTHER = ("vacated_reb", "opp_oreb_rate", "opp_fg3a_rate", "b2b", "three_in_four")
++TESTS = [("threes", "edge_v1", ()), ("threes", "edge_v1", ("edge_v0",)), ("threes", "attempt_trend", ()),
++         ("threes", "hot_gap", ()), ("threes", "vacated_ast", ()),
++         ("rebounds", "edge_struct", ()), ("rebounds", "edge_struct", ("edge_b0",)), ("rebounds", "vacated_reb", ())]
++TRACKING_TESTS = [("rebounds", "edge_track", ()), ("rebounds", "edge_track", ("edge_struct",))]
++GATE = {"min_coverage": 0.90, "min_consistency": 0.95, "seasons": (2023, 2024, 2025)}
++MIN_TRAIN, MIN_TEST = 500, 300
++
++
++def read(p):
++    return [json.loads(x) for x in Path(p).open() if x.strip()]
++
++
++def cluster_ci(values, groups, reps=BOOT, seed=14):
++    by = defaultdict(list)
++    for v, g in zip(values, groups):
++        by[g].append(v)
++    arr = [np.array(v) for v in by.values()]
++    if len(arr) < 10:
++        return None
++    rng = np.random.default_rng(seed)
++    boots = [np.concatenate([arr[i] for i in rng.integers(0, len(arr), len(arr))]).mean() for _ in range(reps)]
++    return [round(float(np.percentile(boots, 2.5)), 5), round(float(np.percentile(boots, 97.5)), 5)]
++
++
++# --------------------------------------------------------------------------- items and folds
++def make_items(stats, games, tracking=None):
++    m13 = build_minutes(stats, games)
++    f14 = build_r14(stats, games, tracking)
++    box = {}
++    for r in stats:
++        g, pl = r.get("game") or {}, r.get("player") or {}
++        if g.get("id") is not None and pl.get("id") is not None:
++            box[(str(g["id"]), str(pl["id"]))] = r
++    items = []
++    for (gid, pid), v in m13.items():
++        r = box.get((gid, pid), {})
++        f = dict(v["features"]); f.update(f14.get((gid, pid), {}))
++        items.append({"gid": gid, "pid": pid, "date": v["date"], "season": v["season"], "minutes": v["minutes"],
++                      "features": v["features"], "f": f, "rates": v["rates"], "stats": v["stats"],
++                      "fg3a": float(r.get("fg3a") or 0)})
++    return items
++
++
++def _num(v, default):
++    return default if v is None else float(v)
++
++
++def fit_fold(train, test):
++    mm = MinutesModel().fit(train)
++    out = {"minutes_model": mm}
++    for name, items in (("train", train), ("test", test)):
++        for it, p in zip(items, mm.predict_mean(items)):
++            it["_pm"] = float(p)
++    # threes V0 (R13) and V1 (attempts x conversion)
++    tr0 = [it for it in train if it["rates"].get("threes") is not None]
++    out["phi_v0"] = nb_dispersion([it["_pm"] * it["rates"]["threes"] for it in tr0], [it["stats"]["threes"] for it in tr0])
++    tr1 = [it for it in train if it["f"].get("fg3a_pm") is not None]
++    out["phi_att"] = nb_dispersion([it["_pm"] * it["f"]["fg3a_pm"] for it in tr1], [it["fg3a"] for it in tr1])
++    # rebounds B0 (R13) and structural GLM
++    trb = [it for it in train if it["rates"].get("rebounds") is not None]
++    out["phi_b0"] = nb_dispersion([it["_pm"] * it["rates"]["rebounds"] for it in trb], [it["stats"]["rebounds"] for it in trb])
++    trs = [it for it in train if it["f"].get("exp_dreb_opps") is not None]
++    if len(trs) >= 200:
++        mean_of = lambda k: float(np.mean([it["f"][k] for it in trs if it["f"].get(k) is not None] or [0.0]))
++        fill = {k: mean_of(k) for k in REB_OTHER}
++        out["reb_centering"] = {"opp_size_in": mean_of("opp_size_in"), "height_in": mean_of("height_in"),
++                                "exp_dreb_opps": mean_of("exp_dreb_opps"), "pm": float(np.mean([it["_pm"] for it in trs])), **fill}
++        X = lambda its, cols: np.array([[reb_cov(it, out["reb_centering"])[c] for c in cols] for it in its])
++        off = lambda its: np.array([reb_offset(it) for it in its])
++        y = np.array([it["stats"]["rebounds"] for it in trs])
++        out["glm_full"] = PoissonGLM().fit(X(trs, REB_PHYS + REB_OTHER), y, off(trs))
++        out["glm_nophys"] = PoissonGLM().fit(X(trs, REB_OTHER), y, off(trs))
++        out["phi_full"] = nb_dispersion(out["glm_full"].predict(X(trs, REB_PHYS + REB_OTHER), off(trs)), y)
++        out["phi_nophys"] = nb_dispersion(out["glm_nophys"].predict(X(trs, REB_OTHER), off(trs)), y)
++        out["_X"], out["_off"] = X, off
++    trt = [it for it in train if it["f"].get("chances_pm") is not None and it["f"].get("chance_conv") is not None]
++    if len(trt) >= 200:
++        out["phi_track"] = nb_dispersion([it["_pm"] * it["f"]["chances_pm"] * it["f"]["chance_conv"] for it in trt],
++                                         [it["stats"]["rebounds"] for it in trt])
++    return out
++
++
++def reb_offset(it):
++    f = it["f"]
++    return max(1e-3, it["_pm"] / 48.0 * (f["exp_dreb_opps"] * f["dreb_share"] + f["exp_oreb_opps"] * f["oreb_share"]))
++
++
++def reb_cov(it, c):
++    f = it["f"]
++    # A player's own height is constant, so his rebound-share history already absorbs it; what varies
++    # game to game is the size of the opponent he faces. Physical terms are built around that.
++    osz = _num(f.get("opp_size_in"), c["opp_size_in"]) - c["opp_size_in"]
++    hgt = _num(f.get("height_in"), c["height_in"]) - c["height_in"]
++    om = f["exp_dreb_opps"] - c["exp_dreb_opps"]
++    out = {"opp_size": osz, "osz_x_oppmiss": osz * om, "osz_x_height": osz * hgt, "osz_x_min": osz * (it["_pm"] - c["pm"])}
++    for k in REB_OTHER:
++        out[k] = _num(f.get(k), c[k])
++    return out
++
++
++def predictions(fold, it):
++    """Per-item model means/dispersions; None where a model cannot be formed."""
++    f, p = it["f"], {}
++    r3 = it["rates"].get("threes")
++    if r3 is not None:
++        p["v0"] = (it["_pm"] * r3, fold["phi_v0"])
++    if f.get("fg3a_pm") is not None:
++        p["v1"] = (it["_pm"] * f["fg3a_pm"], fold["phi_att"], f["fg3_pct_shrunk"])
++    rb = it["rates"].get("rebounds")
++    if rb is not None:
++        p["b0"] = (it["_pm"] * rb, fold["phi_b0"])
++    if f.get("exp_dreb_opps") is not None and "glm_full" in fold:
++        X, off = fold["_X"], fold["_off"]
++        p["full"] = (float(fold["glm_full"].predict(X([it], REB_PHYS + REB_OTHER), off([it]))[0]), fold["phi_full"])
++        p["nophys"] = (float(fold["glm_nophys"].predict(X([it], REB_OTHER), off([it]))[0]), fold["phi_nophys"])
++    if f.get("chances_pm") is not None and f.get("chance_conv") is not None and "phi_track" in fold:
++        p["track"] = (it["_pm"] * f["chances_pm"] * f["chance_conv"], fold["phi_track"])
++    return p
++
++
++# --------------------------------------------------------------------------- Part A
++def part_a(fold, test):
++    preds = [(it, predictions(fold, it)) for it in test]
++
++    def mean_of(m):
++        return m[0] * m[2] if len(m) == 3 else m[0]  # attempts x conversion for the threes compound model
++
++    def compare(a, b, scorer, stat):
++        rows = [(it, pr) for it, pr in preds if a in pr and b in pr]
++        if len(rows) < 50:
++            return {"n": len(rows), "status": "insufficient"}
++        d = [scorer(it, pr[a], stat) - scorer(it, pr[b], stat) for it, pr in rows]
++        mae_a = float(np.mean([abs(it["stats"][stat] - mean_of(pr[a])) for it, pr in rows]))
++        mae_b = float(np.mean([abs(it["stats"][stat] - mean_of(pr[b])) for it, pr in rows]))
++        ci = cluster_ci(d, [it["gid"] for it, _ in rows])
++        return {"n": len(rows), "mean_logscore_gain": round(float(np.mean(d)), 5), "gain_95ci": ci,
++                "mae": {a: round(mae_a, 4), b: round(mae_b, 4)}, "pass": bool(ci and ci[0] > 0)}
++
++    def nb_score(it, m, stat):
++        return nb_logpmf(it["stats"][stat], m[0], m[1])
++
++    def t_score(it, m, stat):
++        return threes_logpmf(it["stats"][stat], *m) if len(m) == 3 else nb_logpmf(it["stats"][stat], m[0], m[1])
++
++    out = {"threes_v1_vs_v0": compare("v1", "v0", t_score, "threes"),
++           "rebounds_full_vs_b0": compare("full", "b0", nb_score, "rebounds"),
++           "rebounds_full_vs_nophys": compare("full", "nophys", nb_score, "rebounds"),
++           "rebounds_track_vs_full": compare("track", "full", nb_score, "rebounds")}
++    if "glm_full" in fold:
++        names = ("intercept",) + REB_PHYS + REB_OTHER
++        g = fold["glm_full"]
++        out["rebound_glm_coefficients_per_sd"] = {n: {"coef": round(float(b), 4), "se": round(float(s), 4)}
++                                                  for n, b, s in zip(names, g.beta_, g.se_)}
++    return out
++
++
++# --------------------------------------------------------------------------- Part B
++def prop_rows(props, items, fold, markets=("threes", "rebounds")):
++    look = {(it["gid"], it["pid"]): it for it in items}
++    best = {}
++    for r in props:
++        m = ALIASES.get(r.get("prop_type"))
++        if m not in markets or (r.get("market") or {}).get("type") != "over_under":
++            continue
++        over, under = prop_prices(r)
++        if over is None or under is None or r.get("line_value") is None:
++            continue
++        key = (str(r["game_id"]), str(r["player_id"]), m)
++        v = str(r.get("vendor") or "").lower()
++        rank = (VENDORS.index(v) if v in VENDORS else 99, str(r.get("opened_at")))
++        if key not in best or rank < best[key][0]:
++            best[key] = (rank, float(r["line_value"]), over, under, v)
++    rows, skipped = [], Counter()
++    for (gid, pid, m), (_, line, over, under, vendor) in best.items():
++        it = look.get((gid, pid))
++        if it is None:
++            skipped["no_box_score_or_history"] += 1; continue
++        val = it["stats"][m]
++        if abs(val - line) < 1e-9:
++            skipped["push"] += 1; continue
++        p_mkt = power_devig_pair(over, under)[0]
++        lp = logit(p_mkt)
++        pr = predictions(fold, it)
++        f = {}
++        if m == "threes":
++            if "v0" in pr:
++                f["edge_v0"] = logit(nb_over_prob(pr["v0"][0], pr["v0"][1], line)) - lp
++            if "v1" in pr:
++                f["edge_v1"] = logit(threes_over_prob(pr["v1"][0], pr["v1"][1], pr["v1"][2], line)) - lp
++            for k in ("attempt_trend", "hot_gap", "vacated_ast"):
++                f[k] = it["f"].get(k)
++        else:
++            if "b0" in pr:
++                f["edge_b0"] = logit(nb_over_prob(pr["b0"][0], pr["b0"][1], line)) - lp
++            if "full" in pr:
++                f["edge_struct"] = logit(nb_over_prob(pr["full"][0], pr["full"][1], line)) - lp
++            if "track" in pr:
++                f["edge_track"] = logit(nb_over_prob(pr["track"][0], pr["track"][1], line)) - lp
++            f["vacated_reb"] = it["f"].get("vacated_reb")
++        rows.append({"game_id": gid, "player_id": pid, "date": it["date"], "market": m, "y": int(val > line), "lp": lp,
++                     "line": line, "over": over, "under": under, "vendor": vendor, "pm": it["_pm"],
++                     "vol": (it["_pm"] * it["f"]["fg3a_pm"]) if it["f"].get("fg3a_pm") is not None else None, "f": f})
++    return rows, skipped
++
++
++def evaluate_incremental(rows, feature, base=(), split=SPLIT_2025, seed=11, keep=False):
++    """R11/R13 harness generalized: baseline = logit(market) + base features; challenger adds `feature`."""
++    need = (feature,) + tuple(base)
++    rows = [r for r in rows if all(r["f"].get(k) is not None for k in need)]
++    tr = [r for r in rows if r["date"] < split]; te = [r for r in rows if r["date"] >= split]
++    if len(tr) < MIN_TRAIN or len(te) < MIN_TEST:
++        return {"status": "insufficient", "train": len(tr), "test": len(te)}
++    stats = {}
++    for k in need:
++        v = np.array([r["f"][k] for r in tr], float)
++        stats[k] = (float(v.mean()), float(v.std()))
++    if stats[feature][1] < 1e-12:
++        return {"status": "no_variance", "train": len(tr), "test": len(te)}
++
++    def mats(rs, with_f):
++        cols = [np.ones(len(rs)), np.array([r["lp"] for r in rs])]
++        for k in tuple(base) + ((feature,) if with_f else ()):
++            mu, sd = stats[k]
++            cols.append((np.array([r["f"][k] for r in rs]) - mu) / (sd if sd > 1e-12 else 1.0))
++        return np.column_stack(cols), np.array([r["y"] for r in rs], float)
++
++    Xb, y = mats(tr, False); Xc, _ = mats(tr, True)
++    bb, bc = fit_logistic(Xb, y), fit_logistic(Xc, y)
++    half = sorted(tr, key=lambda r: r["date"]); h1, h2 = half[:len(half) // 2], half[len(half) // 2:]
++    c1 = fit_logistic(*mats(h1, True))[-1]; c2 = fit_logistic(*mats(h2, True))[-1]
++    Tb, yt = mats(te, False); Tc, _ = mats(te, True)
++    lb, lc = loglik_terms(Tb, yt, bb), loglik_terms(Tc, yt, bc)
++    d = lc - lb
++    by = defaultdict(list)
++    for r, di in zip(te, d):
++        by[r["game_id"]].append(di)
++    g = [np.array(v) for v in by.values()]
++    rng = np.random.default_rng(seed)
++    boots = np.array([np.concatenate([g[i] for i in rng.integers(0, len(g), len(g))]).mean() for _ in range(BOOT)])
++    pc = 1 / (1 + np.exp(-(Tc @ bc))); pb = 1 / (1 + np.exp(-(Tb @ bb)))
++    res = {"status": "tested", "train": len(tr), "test": len(te), "test_games": len(g),
++           "coef_std": round(float(bc[-1]), 4), "coef_half1": round(float(c1), 4), "coef_half2": round(float(c2), 4),
++           "sign_stable": bool(np.sign(c1) == np.sign(c2) == np.sign(bc[-1])),
++           "delta_logloss": round(float(d.mean()), 6),
++           "delta_95ci": [round(float(np.percentile(boots, 2.5)), 6), round(float(np.percentile(boots, 97.5)), 6)],
++           "p_one_sided": round(float((boots >= 0).mean()), 4),
++           "brier": {"baseline": round(float(np.mean((pb - yt) ** 2)), 6), "challenger": round(float(np.mean((pc - yt) ** 2)), 6)},
++           "baseline_test_logloss": round(float(lb.mean()), 5)}
++    if keep:
++        res["_te"], res["_d"], res["_pc"], res["_pb"] = te, d, pc, pb
++    return res
++
++
++def run_tests(rows, tests, split=SPLIT_2025):
++    results, keys, pv = {}, [], []
++    for m, feat, base in tests:
++        k = f"{m}|{feat}" + (f"|beyond:{'+'.join(base)}" if base else "")
++        res = evaluate_incremental([r for r in rows if r["market"] == m], feat, base, split)
++        results[k] = res
++        if res["status"] == "tested":
++            keys.append(k); pv.append(res["p_one_sided"])
++    sig = benjamini_hochberg(pv, FDR_Q) if pv else []
++    for k, s in zip(keys, sig):
++        r = results[k]
++        r["bh_significant"] = s
++        r["verdict"] = "PASS" if (s and r["delta_logloss"] < 0 and r["delta_95ci"][1] < 0 and r["sign_stable"]) else "FAIL"
++    return results, [k for k in keys if results[k]["verdict"] == "PASS"]
++
++
++# --------------------------------------------------------------------------- R13 threes diagnosis
++def diagnose_threes(rows, split=SPLIT_2025):
++    res = evaluate_incremental([r for r in rows if r["market"] == "threes"], "edge_v0", (), split, keep=True)
++    if res["status"] != "tested":
++        return {"reproduction": res}
++    te, d, pc, pb = res.pop("_te"), res.pop("_d"), res.pop("_pc"), res.pop("_pb")
++
++    def agg(mask_fn):
++        out = {}
++        groups = defaultdict(list)
++        for i, r in enumerate(te):
++            groups[mask_fn(r, i)].append(i)
++        for k, idx in sorted(groups.items(), key=lambda kv: str(kv[0])):
++            dd = d[idx]
++            out[str(k)] = {"n": len(idx), "delta_logloss": round(float(dd.mean()), 6),
++                           "ci": cluster_ci(list(dd), [te[i]["game_id"] for i in idx])}
++        return out
++
++    edge = np.array([r["f"]["edge_v0"] for r in te])
++    lb = lambda r, i: "0.5" if r["line"] <= 0.5 else ("1.5" if r["line"] <= 1.5 else ("2.5" if r["line"] <= 2.5 else "3.5+"))
++    mb = lambda r, i: "lt20" if r["pm"] < 20 else ("20-30" if r["pm"] < 30 else "30+")
++    vb = lambda r, i: "unknown" if r["vol"] is None else ("lt3" if r["vol"] < 3 else ("3-6" if r["vol"] < 6 else "6+"))
++    deciles = np.quantile(edge, np.linspace(0, 1, 11))
++    dec = []
++    y = np.array([r["y"] for r in te])
++    for k in range(10):
++        m = (edge >= deciles[k]) & ((edge <= deciles[k + 1]) if k == 9 else (edge < deciles[k + 1]))
++        if not m.any():
++            continue
++        idx = np.where(m)[0]
++        pnl = []
++        for i in idx:
++            r = te[i]
++            side_over = pc[i] > 1 / (1 + math.exp(-r["lp"]))
++            price = r["over"] if side_over else r["under"]
++            won = (r["y"] == 1) == side_over
++            pnl.append(profit_per_unit(price) if won else -1.0)
++        dec.append({"decile": k + 1, "edge_range": [round(float(deciles[k]), 3), round(float(deciles[k + 1]), 3)], "n": int(m.sum()),
++                    "mean_p_market": round(float(np.mean([1 / (1 + math.exp(-te[i]["lp"])) for i in idx])), 4),
++                    "mean_p_recalibrated_model": round(float(pc[m].mean()), 4), "over_hit_rate": round(float(y[m].mean()), 4),
++                    "descriptive_roi_pct_side_toward_model_at_opening_price": round(100 * float(np.mean(pnl)), 2)})
++    return {"reproduction": res,
++            "by_line": agg(lb), "by_model_direction": agg(lambda r, i: "model_over" if r["f"]["edge_v0"] > 0 else "model_under"),
++            "by_predicted_minutes": agg(mb), "by_projected_attempts": agg(vb), "by_month": agg(lambda r, i: r["date"][:7]),
++            "by_vendor": agg(lambda r, i: r["vendor"]), "edge_deciles": dec,
++            "note": "All slices are post-hoc on the window where the PASS was found; they explain, they cannot confirm. "
++                    "ROI is descriptive at opening prices and assumes every row was bettable."}
++
++
++# --------------------------------------------------------------------------- frozen shadow recipe
++SHADOW_THRESHOLD = 0.03  # bet toward the recalibrated model only when it differs from the de-vigged price by >= 3 pts
++
++
++def freeze_threes(items, rows_2025):
++    """Freeze the R13 threes recipe for 2026-27 shadow tracking. Minutes model + 3PM-rate dispersion are refit
++    on every completed season (2023-24..2025-26); the recalibration (logit market + standardized edge) is fit on
++    all 2025-26 threes rows from the walk-forward fold. Nothing here is a validated betting rule."""
++    full = [dict(it) for it in items if it["season"] in (2023, 2024, 2025)]
++    if len(full) < 1000:
++        return {"status": "insufficient"}
++    mm = MinutesModel().fit(full)
++    for it, p in zip(full, mm.predict_mean(full)):
++        it["_pm"] = float(p)
++    tr0 = [it for it in full if it["rates"].get("threes") is not None]
++    phi = nb_dispersion([it["_pm"] * it["rates"]["threes"] for it in tr0], [it["stats"]["threes"] for it in tr0])
++    th = [r for r in rows_2025 if r["market"] == "threes" and r["f"].get("edge_v0") is not None]
++    if len(th) < 500:
++        return {"status": "insufficient_rows", "rows": len(th)}
++    e = np.array([r["f"]["edge_v0"] for r in th]); mu, sd = float(e.mean()), float(e.std())
++    X = np.column_stack([np.ones(len(th)), [r["lp"] for r in th], (e - mu) / sd])
++    beta = fit_logistic(X, np.array([r["y"] for r in th], float))
++    return {"status": "frozen", "minutes_model_coefficients": mm.coefficients(),
++            "minutes_model_standardization": {"mean": [round(float(v), 6) for v in mm.mu], "sd": [round(float(v), 6) for v in mm.sd]},
++            "phi_threes": round(phi, 6), "edge_standardization": {"mean": round(mu, 6), "sd": round(sd, 6)},
++            "recalibration_logit": {"intercept": round(float(beta[0]), 6), "market_logit": round(float(beta[1]), 6),
++                                    "edge_z": round(float(beta[2]), 6)},
++            "decision_rule": f"bet the side toward the recalibrated probability when |p_recal - p_devig| >= {SHADOW_THRESHOLD}, "
++                             "at the price observed by the logger at the daily scan time; flat 1 unit; shadow only",
++            "rows_used_for_recalibration": len(th), "trained_on_seasons": [2023, 2024, 2025]}
++
++
++# --------------------------------------------------------------------------- vacated-minutes audit
++def vacated_audit(stats, games, season=2025, rotation_min=15.0):
++    """How often does the R13/R14 'absent from the previous game' proxy mislead? (diagnostic; uses
++    post-game box scores on purpose, so it is never a feature)."""
++    import bisect
++    from scripts.regular_season_filter import minutes as pm
++    sched = defaultdict(list)
++    for g in games:
++        if g.get("season") != season or g.get("postseason"):
++            continue
++        for side in ("home_team", "visitor_team"):
++            t = (g.get(side) or {}).get("id")
++            if t is not None:
++                sched[str(t)].append((str(g["date"])[:10], str(g["id"])))
++    for t in sched:
++        sched[t].sort()
++    appear = defaultdict(list)
++    in_game = defaultdict(set)
++    for r in stats:
++        g = r.get("game") or {}
++        pid, tid = str((r.get("player") or {}).get("id")), str((r.get("team") or {}).get("id"))
++        appear[pid].append((str(g.get("date"))[:10], str(g.get("id")), tid, pm(r.get("min"))))
++        in_game[str(g.get("id"))].add(pid)
++    for v in appear.values():
++        v.sort()
++    dates = {pid: [a[0] for a in ap] for pid, ap in appear.items()}
++    events = sorted((d, tid, i) for tid, gs in sched.items() for i, (d, _) in enumerate(gs) if i > 0)
++    last = {}                        # pid -> index into appear[pid] of most recent appearance before the day
++    roster = defaultdict(set)
++    counts = Counter()
++    pointer = {pid: 0 for pid in appear}
++    def advance(day):
++        for pid, ap in appear.items():
++            j = pointer[pid]
++            while j < len(ap) and ap[j][0] < day:
++                old = last.get(pid)
++                if old is not None:
++                    roster[ap[old][2]].discard(pid)
++                last[pid] = j; roster[ap[j][2]].add(pid); j += 1
++            pointer[pid] = j
++    current_day = None
++    for day, tid, i in events:
++        if day != current_day:
++            advance(day); current_day = day
++        gs = sched[tid]; gid, prev = gs[i][1], gs[i - 1][1]
++        recent = {g_ for _, g_ in gs[max(0, i - 5):i]}
++        for pid in roster[tid]:
++            ap = appear[pid]; j = last[pid]
++            if ap[j][1] not in recent:
++                continue
++            last10 = ap[max(0, j - 9):j + 1]
++            if sum(a[3] for a in last10) / len(last10) < rotation_min or pid in in_game.get(prev, set()):
++                continue
++            counts["flagged_absences"] += 1
++            if pid in in_game.get(gid, set()):
++                counts["played_tonight_anyway"] += 1
++            k = bisect.bisect_left(dates[pid], day)
++            if k < len(ap) and ap[k][2] != tid:
++                counts["next_appearance_other_team_(trade)"] += 1
++            elif k >= len(ap):
++                counts["never_appeared_again_in_data"] += 1
++    n = counts["flagged_absences"] or 1
++    return {"season": season, **dict(counts),
++            "share_played_tonight_anyway": round(counts["played_tonight_anyway"] / n, 4),
++            "share_trade_phantoms": round(counts["next_appearance_other_team_(trade)"] / n, 4),
++            "reading": "played_tonight_anyway = the proxy said 'absent' but he played (the books knew from the injury report). "
++                       "trade phantoms = teammate left via trade; the proxy keeps him on the old roster until he appears for the new team."}
++
++
++# --------------------------------------------------------------------------- tracking gate
++def tracking_rows(paths):
++    out = {}
++    for p in paths:
++        for r in read(p):
++            if r.get("period") not in (0, None):
++                continue
++            gid = (r.get("game") or {}).get("id", r.get("game_id")); pid = (r.get("player") or {}).get("id", r.get("player_id"))
++            if gid is not None and pid is not None:
++                out[(str(gid), str(pid))] = r
++    return out
++
++
++def tracking_gate(tracking, stats, games, manifests):
++    season_of = {str(g["id"]): g.get("season") for g in games}
++    cov = {}
++    for s in GATE["seasons"]:
++        keys = [(str(r["game"]["id"]), str(r["player"]["id"])) for r in stats
++                if season_of.get(str(r["game"]["id"])) == s and _min(r) >= 10]
++        have = sum(1 for k in keys if (tracking.get(k) or {}).get("rebound_chances_total") is not None)
++        cov[str(s)] = round(have / len(keys), 4) if keys else 0.0
++    cons = {str(m.get("season")): m.get("period_consistency", {}).get("rebound_chances_total") for m in manifests}
++    ok = all(cov.get(str(s), 0) >= GATE["min_coverage"] for s in GATE["seasons"]) and \
++        all((cons.get(str(s)) is None) or cons[str(s)] >= GATE["min_consistency"] for s in GATE["seasons"])
++    return {"passed": ok, "coverage_box_player_games_min10": cov, "period_consistency": cons, "gate": GATE}
++
++
++def _min(r):
++    from scripts.regular_season_filter import minutes
++    return minutes(r.get("min"))
++
++
++# --------------------------------------------------------------------------- run
++def run(stats, games, props_2025, props_2024=None, tracking=None, manifests=(), validated=True):
++    if validated:
++        require_eligible(props_2025, "R14 information tests")
++    gate = tracking_gate(tracking, stats, games, manifests) if tracking else {"passed": False, "reason": "no tracking supplied"}
++    items = make_items(stats, games, tracking if gate["passed"] else None)
++    out = {"tracking_gate": gate, "part_a": {}, "evidence_class": "validated" if validated else "exploratory_unverified_prices"}
++    folds = {}
++    for name, (tr_s, te_s) in FOLDS.items():
++        train = [dict(it) for it in items if it["season"] in tr_s]
++        test = [dict(it) for it in items if it["season"] == te_s]
++        if len(train) < 1000 or len(test) < 500:
++            out["part_a"][name] = {"status": "insufficient", "train": len(train), "test": len(test)}
++            continue
++        fold = fit_fold(train, test)
++        folds[name] = (fold, test)
++        out["part_a"][name] = {"train": len(train), "test": len(test), **part_a(fold, test)}
++    pa = [out["part_a"][k] for k in FOLDS if "threes_v1_vs_v0" in out["part_a"].get(k, {})]
++    out["part_a_verdicts"] = {
++        "threes_attempts_x_conversion_beats_R13": bool(pa) and len(pa) == 2 and all(x["threes_v1_vs_v0"].get("pass") for x in pa),
++        "rebound_structure_beats_R13": bool(pa) and len(pa) == 2 and all(x["rebounds_full_vs_b0"].get("pass") for x in pa),
++        "physical_terms_add_prediction": bool(pa) and len(pa) == 2 and all(x["rebounds_full_vs_nophys"].get("pass") for x in pa)}
++    rows = []
++    if "fold_2025" in folds:
++        fold, test = folds["fold_2025"]
++        rows, skipped = prop_rows(props_2025, test, fold)
++        tests = TESTS + (TRACKING_TESTS if gate["passed"] else [])
++        results, passing = run_tests(rows, tests)
++        out["part_b"] = {"tests": [f"{m}|{f}" + (f"|beyond:{'+'.join(b)}" if b else "") for m, f, b in tests],
++                         "rows_by_market": dict(Counter(r["market"] for r in rows)), "skipped": dict(skipped),
++                         "results": results, "passing": passing, "split_date": SPLIT_2025, "fdr_q": FDR_Q}
++        out["r13_threes_diagnosis"] = diagnose_threes(rows)
++    if props_2024 and "fold_2024" in folds:
++        fold, test = folds["fold_2024"]
++        rows, skipped = prop_rows(props_2024, test, fold)
++        rep = {}
++        for m, feat in (("threes", "edge_v0"), ("threes", "edge_v1"), ("rebounds", "edge_b0"), ("rebounds", "edge_struct")):
++            rep[f"{m}|{feat}"] = evaluate_incremental([r for r in rows if r["market"] == m], feat, (), SPLIT_2024)
++        out["replication_2024_25"] = {"evidence_class": "exploratory_unverified_prices",
++                                      "why": "2024-25 opening timestamps sit at tip and are outside BALLDONTLIE's documented "
++                                             "opening coverage; models trained on 2023-24 only",
++                                      "rows_by_market": dict(Counter(r["market"] for r in rows)), "skipped": dict(skipped),
++                                      "results": rep}
++    if "fold_2025" in folds:
++        out["frozen_threes_shadow_recipe"] = freeze_threes(items, rows if "part_b" in out else [])
++    out["vacated_audit_2025"] = vacated_audit(stats, games, 2025)
++    out["cumulative_tests_on_2025_26_window"] = {"R11": 11, "R12": 2, "R13": 12,
++                                                 "R14": len(out.get("part_b", {}).get("tests", []))}
++    return out
++
++
++def main():
++    p = argparse.ArgumentParser()
++    p.add_argument("--stats", action="append", required=True)
++    p.add_argument("--games", action="append", required=True)
++    p.add_argument("--props", required=True, help="gated 2025-26 opening props")
++    p.add_argument("--props-2024", help="2024-25 opening props (quarantined; exploratory replication)")
++    p.add_argument("--tracking", action="append", default=[])
++    p.add_argument("--tracking-manifest", action="append", default=[])
++    p.add_argument("--out", required=True)
++    a = p.parse_args()
++    tracking = tracking_rows(a.tracking) if a.tracking else None
++    manifests = [json.loads(Path(m).read_text()) for m in a.tracking_manifest]
++    res = run([s for f in a.stats for s in read(f)], [g for f in a.games for g in read(f)], read(a.props),
++              read(a.props_2024) if a.props_2024 else None, tracking, manifests)
++    Path(a.out).parent.mkdir(parents=True, exist_ok=True)
++    Path(a.out).write_text(json.dumps(res, indent=2, default=str) + "\n")
++    print(json.dumps({"tracking_gate": res["tracking_gate"], "part_a_verdicts": res["part_a_verdicts"]}, indent=2))
++    for k, v in (res.get("part_b") or {}).get("results", {}).items():
++        print(k, v.get("verdict", v["status"]), v.get("delta_logloss"), v.get("delta_95ci"), v.get("p_one_sided"))
++    print("R13 reproduction:", json.dumps((res.get("r13_threes_diagnosis") or {}).get("reproduction"), default=str))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_round14.py b/tests/test_round14.py
+new file mode 100644
+index 0000000..39d83a5
+--- /dev/null
++++ b/tests/test_round14.py
+@@ -0,0 +1,235 @@
++import math
++import random
++from datetime import date, timedelta
++
++import numpy as np
++import pytest
++
++from v13.provenance import UnverifiedOddsError, quarantine
++from v13.r14_models import PoissonGLM, nb_logpmf, nb_pmf_vector, threes_logpmf, threes_over_prob
++
++STARTS = {2023: date(2023, 10, 24), 2024: date(2024, 10, 22), 2025: date(2025, 10, 22)}
++
++
++def to_am(p):
++    p = min(max(p, 0.03), 0.97)
++    return int(round(-100 * p / (1 - p))) if p >= 0.5 else int(round(100 * (1 - p) / p))
++
++
++def pois_over(mu, line):
++    k = math.floor(line)
++    return 1 - sum(math.exp(-mu) * mu ** j / math.factorial(j) for j in range(k + 1))
++
++
++def poisson(rng, lam):
++    L, k, p = math.exp(-lam), 0, 1.0
++    while True:
++        p *= rng.random()
++        if p <= L:
++            return k
++        k += 1
++
++
++def league(seed=0, market_efficient=False, days=150, height_effect=0.06):
++    """6 teams x 9 players. Rebounds = minutes x opponent misses x share x exp(height effect);
++    3PM = Binomial(Poisson attempts, true %). A naive market prices from season-to-date averages;
++    an efficient market prices from the true means."""
++    rng = random.Random(seed)
++    teams = {}
++    for t in range(1, 7):
++        roster = []
++        for k in range(9):
++            pos = "C" if k < 2 else ("F" if k < 5 else "G")
++            h = {"C": 84, "F": 80, "G": 76}[pos] + rng.randint(-3, 3) + (t - 3)
++            roster.append({"id": t * 100 + k, "pos": pos, "h": h, "min": rng.uniform(14, 34),
++                           "a3": rng.uniform(0.02, 0.25) if pos != "C" else 0.01, "p3": rng.uniform(0.30, 0.42),
++                           "sd": {"C": 0.30, "F": 0.18, "G": 0.10}[pos], "so": {"C": 0.12, "F": 0.06, "G": 0.03}[pos]})
++        teams[t] = {"roster": roster, "fg": rng.uniform(0.40, 0.52), "fga": rng.uniform(78, 96)}
++    games, stats, props, raw2024 = [], [], [], []
++    run_avg = {}
++    gid = 0
++    for season, start in STARTS.items():
++        run_avg = {}
++        for d in range(days):
++            day = (start + timedelta(days=d)).isoformat()
++            order = list(teams); rng.shuffle(order)
++            for i in (0, 2):
++                h_, a_ = order[i], order[i + 1]; gid += 1
++                games.append({"id": gid, "date": day, "datetime": day + "T23:30:00Z", "season": season, "period": 4,
++                              "home_team": {"id": h_}, "visitor_team": {"id": a_}, "status": "Final", "postseason": False})
++                lines = {}
++                for team, opp in ((h_, a_), (a_, h_)):
++                    T = teams[team]; tot = sum(p["min"] for p in T["roster"])
++                    lines[team] = []
++                    for p in T["roster"]:
++                        m = max(2.0, 240 * p["min"] / tot + rng.gauss(0, 2.5))
++                        fga = poisson(rng, T["fga"] * m / 240)
++                        fgm = sum(rng.random() < T["fg"] for _ in range(fga))
++                        att = poisson(rng, p["a3"] * m)
++                        made = sum(rng.random() < p["p3"] for _ in range(att))
++                        lines[team].append([p, m, fga, fgm, att, made])
++                miss = {t: sum(x[2] - x[3] for x in lines[t]) for t in lines}
++                size = {t: sum(x[0]["h"] * x[1] for x in lines[t]) / sum(x[1] for x in lines[t]) for t in lines}
++                for team, opp in ((h_, a_), (a_, h_)):
++                    for p, m, fga, fgm, att, made in lines[team]:
++                        hd = p["h"] - size[opp]
++                        mu_d = m / 48 * miss[opp] * p["sd"] * math.exp(height_effect * hd)
++                        mu_o = m / 48 * miss[team] * p["so"]
++                        dreb, oreb = poisson(rng, mu_d), poisson(rng, mu_o)
++                        stats.append({"min": f"{int(m)}:{int((m % 1) * 60):02d}", "pts": 2 * fgm + made, "reb": dreb + oreb,
++                                      "dreb": dreb, "oreb": oreb, "ast": 2, "fga": fga, "fgm": fgm, "fg3a": att, "fg3m": made,
++                                      "pf": 2, "player": {"id": p["id"], "height": f"{p['h'] // 12}-{p['h'] % 12}",
++                                                          "position": p["pos"], "draft_year": 2018},
++                                      "team": {"id": team}, "game": {"id": gid, "date": day, "season": season}})
++                        ra = run_avg.setdefault(p["id"], {"n": 0, "reb": 0.0, "3pm": 0.0})
++                        if season in (2024, 2025) and ra["n"] >= 5:
++                            exp_m = 240 * p["min"] / sum(q["min"] for q in teams[team]["roster"])
++                            if market_efficient:
++                                mu_r = exp_m / 48 * (teams[opp]["fga"] * (1 - teams[opp]["fg"])) * p["sd"] * math.exp(height_effect * hd) \
++                                    + exp_m / 48 * (teams[team]["fga"] * (1 - teams[team]["fg"])) * p["so"]
++                                mu_3 = p["a3"] * exp_m * p["p3"]
++                            else:
++                                mu_r, mu_3 = ra["reb"] / ra["n"], ra["3pm"] / ra["n"]
++                            for ptype, mu, actual_line in (("rebounds", mu_r, None), ("threes", mu_3, None)):
++                                if mu < 0.3:
++                                    continue
++                                line = math.floor(mu) + 0.5
++                                po = pois_over(mu, line)
++                                row = {"game_id": gid, "player_id": p["id"], "vendor": "draftkings", "prop_type": ptype,
++                                       "line_value": str(line), "opened_at": day + "T15:00:00Z",
++                                       "market": {"type": "over_under", "over_odds": to_am(po), "under_odds": to_am(1 - po)}}
++                                (props if season == 2025 else raw2024).append(row)
++                        ra["n"] += 1; ra["reb"] += dreb + oreb; ra["3pm"] += made
++    gated, _, _ = quarantine(props, games, "bdl_opening_player_props")
++    return stats, games, gated, props, raw2024
++
++
++@pytest.fixture(scope="module")
++def naive():
++    return league(seed=3)
++
++
++def test_threes_compound_probability_matches_brute_force():
++    mu, phi, pct, line = 5.0, 0.15, 0.37, 1.5
++    pa = nb_pmf_vector(mu, phi, 60)
++    brute = 0.0
++    for a in range(61):
++        brute += pa[a] * sum(math.comb(a, m) * pct ** m * (1 - pct) ** (a - m) for m in range(2, a + 1))
++    assert threes_over_prob(mu, phi, pct, line, amax=60) == pytest.approx(brute, abs=1e-6)
++    assert sum(math.exp(threes_logpmf(m, mu, phi, pct, amax=60)) for m in range(0, 30)) == pytest.approx(1.0, abs=1e-6)
++    assert sum(math.exp(nb_logpmf(k, 7.0, 0.2)) for k in range(200)) == pytest.approx(1.0, abs=1e-6)
++
++
++def test_poisson_glm_recovers_effect_with_offset():
++    rng = np.random.default_rng(0)
++    x = rng.normal(size=(5000, 2)); off = rng.uniform(1, 6, 5000)
++    y = rng.poisson(off * np.exp(0.3 * x[:, 0] - 0.2 * x[:, 1]))
++    g = PoissonGLM(ridge=0.0).fit(x, y, off)
++    per_sd = g.beta_[1:] / g.sd_
++    assert per_sd[0] == pytest.approx(0.3, abs=0.04) and per_sd[1] == pytest.approx(-0.2, abs=0.04)
++    assert g.beta_[0] == pytest.approx(0.0, abs=0.05)
++
++
++def test_r14_features_use_only_earlier_days(naive):
++    from v13.r14_features import build
++    stats, games, *_ = naive
++    last = max(str(g["date"]) for g in games)
++    before = build(stats, games)
++    changed = [dict(r, reb=30, dreb=25, oreb=5, fg3a=15, fg3m=15, fga=40, fgm=1) if r["game"]["date"] == last else r for r in stats]
++    after = build(changed, games)
++    keys = [k for k in before if any(g["date"] == last and str(g["id"]) == k[0] for g in games)]
++    assert keys
++    for k in keys:
++        assert before[k] == after[k]
++
++
++def test_incremental_test_rejects_redundant_feature():
++    from scripts.r14_research import evaluate_incremental
++    rng = np.random.default_rng(1)
++    rows = []
++    for i in range(4000):
++        z = rng.normal()
++        p = 1 / (1 + math.exp(-(0.8 * z)))
++        rows.append({"game_id": str(i // 4), "date": "2026-01-01" if i < 2400 else "2026-03-01",
++                     "y": int(rng.random() < p), "lp": 0.0, "f": {"a": z, "copy": z + rng.normal() * 1e-3, "noise": rng.normal()}})
++    alone = evaluate_incremental(rows, "a")
++    assert alone["delta_logloss"] < 0 and alone["delta_95ci"][1] < 0
++    redundant = evaluate_incremental(rows, "copy", ("a",))
++    assert redundant["delta_95ci"][1] >= 0 or abs(redundant["delta_logloss"]) < 1e-3
++
++
++def test_full_run_finds_structure_when_market_is_naive(naive):
++    from scripts.r14_research import run
++    stats, games, gated, _, raw2024 = naive
++    res = run(stats, games, gated, raw2024)
++    pa = res["part_a"]["fold_2025"]
++    assert pa["rebounds_full_vs_b0"]["mean_logscore_gain"] > 0
++    assert pa["rebound_glm_coefficients_per_sd"]["opp_size"]["coef"] < 0  # bigger opponents, fewer boards
++    assert res["part_a"]["fold_2024"]["threes_v1_vs_v0"]["n"] > 100
++    b = res["part_b"]["results"]
++    assert b["rebounds|edge_struct"]["status"] == "tested"
++    assert b["rebounds|edge_struct"]["delta_logloss"] < 0
++    assert res["r13_threes_diagnosis"]["reproduction"]["status"] == "tested"
++    assert "edge_deciles" in res["r13_threes_diagnosis"]
++    assert res["replication_2024_25"]["evidence_class"] == "exploratory_unverified_prices"
++    assert res["tracking_gate"]["passed"] is False
++
++
++def test_no_information_when_market_is_efficient():
++    from scripts.r14_research import run
++    stats, games, gated, _, _ = league(seed=3, market_efficient=True)
++    b = run(stats, games, gated)["part_b"]["results"]
++    assert b["rebounds|edge_struct"].get("verdict") != "PASS"
++    assert b["threes|edge_v1"].get("verdict") != "PASS"
++
++
++def test_refuses_ungated(naive):
++    from scripts.r14_research import run
++    stats, games, _, raw, _ = naive
++    with pytest.raises(UnverifiedOddsError):
++        run(stats, games, raw)
++
++
++def test_vacated_audit_counts_trade_phantoms():
++    from scripts.r14_research import vacated_audit
++    games, stats = [], []
++    for i in range(1, 9):
++        games.append({"id": i, "date": f"2025-11-{i:02d}", "season": 2025, "postseason": False,
++                      "home_team": {"id": 1}, "visitor_team": {"id": 2 if i < 5 else 3}})
++    for i in range(1, 9):
++        for pid in (10, 11):
++            team = 1
++            if pid == 11 and i >= 5:
++                team = 3  # traded to team 3 after game 4, plays for team 3 from game 6
++                if i == 5:
++                    continue
++            stats.append({"min": "30:00", "player": {"id": pid}, "team": {"id": team}, "game": {"id": i, "date": f"2025-11-{i:02d}"}})
++    out = vacated_audit(stats, games, 2025)
++    assert out["flagged_absences"] >= 1 and out["next_appearance_other_team_(trade)"] >= 1
++
++
++def test_tracking_audit_and_gate():
++    from scripts.collect_tracking import audit
++    from scripts.r14_research import tracking_gate
++    rows = []
++    for gid in (1, 2):
++        for per, val in ((0, 10), (1, 3), (2, 3), (3, 2), (4, 2 if gid == 1 else 9)):
++            rows.append({"game": {"id": gid, "date": "2025-11-01"}, "player": {"id": 7}, "period": per,
++                         "rebound_chances_total": val, "touches": None})
++    full, aud = audit(rows)
++    assert len(full) == 2 and aud["period_consistency"]["rebound_chances_total"] == 0.5
++    assert aud["field_nonnull_period0"]["touches"] == 0.0 and aud["duplicate_keys"] == 0
++    games = [{"id": g, "season": s} for g, s in ((1, 2023), (2, 2024), (3, 2025))]
++    stats = [{"min": "20:00", "game": {"id": g}, "player": {"id": 7}} for g in (1, 2, 3)]
++    tr = {(str(g), "7"): {"rebound_chances_total": 5} for g in (1, 2, 3)}
++    assert tracking_gate(tr, stats, games, [])["passed"] is True
++    tr.pop(("2", "7"))
++    assert tracking_gate(tr, stats, games, [])["passed"] is False
++
++
++def test_frozen_shadow_recipe_is_emitted(naive):
++    from scripts.r14_research import run
++    stats, games, gated, _, _ = naive
++    fr = run(stats, games, gated)["frozen_threes_shadow_recipe"]
++    assert fr["status"] == "frozen" and fr["trained_on_seasons"] == [2023, 2024, 2025]
++    assert set(fr["recalibration_logit"]) == {"intercept", "market_logit", "edge_z"}
+diff --git a/v13/r14_features.py b/v13/r14_features.py
+new file mode 100644
+index 0000000..f23d229
+--- /dev/null
++++ b/v13/r14_features.py
+@@ -0,0 +1,194 @@
++"""Round 14 pregame features for three-pointers and rebounds (box scores + optional tracking).
++
++Every value for a player-game uses only games on strictly earlier days, and the day's results
++are folded into history only after all of that day's features exist (same rule as R11/R13).
++
++Three-pointers (attempts separated from conversion)
++  fg3a_pm            EWMA (half-life 10 games) of 3PA per minute, games with >= 5 min
++  fg3_pct_shrunk     (career-to-date 3PM + K3 * league%) / (career-to-date 3PA + K3), league% to date
++  hot_gap            last-5-game 3P% minus fg3_pct_shrunk (None if < 10 attempts in those games)
++  attempt_trend      3PA/min over last 5 games minus last 20
++  vacated_ast        last-10 assists per game of rotation teammates absent from the team's previous game
++Rebounds (team opportunities -> player share)
++  exp_dreb_opps      0.5 * opponent's own missed FG (L10) + 0.5 * misses our defence forced (L10)
++  exp_oreb_opps      0.5 * our missed FG (L10) + 0.5 * misses the opponent's defence forced (L10)
++  dreb_share         EWMA of DREB / (opponent misses x min/48), shrunk to the position mean to date
++  oreb_share         EWMA of OREB / (own misses x min/48), shrunk likewise
++  opp_oreb_rate      opponent OREB / opponent missed FG (L10): competition for our defensive boards
++  vacated_reb        last-10 rebounds per game of rotation teammates absent from the previous game
++  height_diff, opp_fg3a_rate come from v13.matchup_features (R11)
++Tracking (only when supplied and covered; /nba/v2/stats/advanced period-0 rows)
++  chances_pm         EWMA of rebound_chances_total per minute
++  chance_conv        (career-to-date REB + KC * league conversion) / (chances + KC)
++"""
++from collections import defaultdict, deque
++
++from scripts.regular_season_filter import minutes as parse_minutes
++from v13.matchup_features import build as build_matchup
++from v13.minutes_model import ROTATION_MIN, ewma
++
++HL = 10.0
++K3 = 150.0     # shrinkage (attempts) for 3P%
++KS = 5.0       # shrinkage (games) for rebound shares toward the position mean
++KC = 30.0      # shrinkage (chances) for rebound conversion
++
++
++def _f(r, k):
++    try:
++        return float(r.get(k) or 0)
++    except (TypeError, ValueError):
++        return 0.0
++
++
++def pos_group(p):
++    p = str(p or "").upper()
++    return "C" if p.startswith("C") else ("F" if p.startswith("F") else ("G" if p.startswith("G") else "U"))
++
++
++def build(stats, games, tracking=None):
++    """(gid, pid) -> feature dict. `tracking`: optional {(gid, pid): period-0 advanced row}."""
++    matchup = build_matchup(stats, games)
++    gmeta = {str(g["id"]): g for g in games}
++    team_sched = defaultdict(list)
++    for g in games:
++        if g.get("postseason"):
++            continue
++        for side in ("home_team", "visitor_team"):
++            t = (g.get(side) or {}).get("id")
++            if t is not None:
++                team_sched[str(t)].append((str(g.get("date"))[:10], str(g["id"])))
++    for t in team_sched:
++        team_sched[t].sort()
++    rows = []
++    for r in stats:
++        g, pl, tm = r.get("game") or {}, r.get("player") or {}, r.get("team") or {}
++        if g.get("id") is None or pl.get("id") is None or tm.get("id") is None:
++            continue
++        gid = str(g["id"])
++        rows.append({"gid": gid, "date": str(g.get("date") or gmeta.get(gid, {}).get("date"))[:10], "pid": str(pl["id"]),
++                     "tid": str(tm["id"]), "min": parse_minutes(r.get("min")), "row": r, "pos": pos_group(pl.get("position"))})
++    teams_in_game = defaultdict(set)
++    for x in rows:
++        teams_in_game[x["gid"]].add(x["tid"])
++    opp = {(gid, t): next(iter(ts - {t}), None) for gid, ts in teams_in_game.items() for t in ts}
++    by_date = defaultdict(list)
++    for x in rows:
++        by_date[x["date"]].append(x)
++
++    team_hist = defaultdict(lambda: deque(maxlen=10))
++    hist = defaultdict(lambda: deque(maxlen=40))
++    career = defaultdict(lambda: {"fg3a": 0.0, "fg3m": 0.0, "reb": 0.0, "chances": 0.0})
++    league = {"fg3a": 0.0, "fg3m": 0.0, "reb": 0.0, "chances": 0.0}
++    pos_share = defaultdict(lambda: {"d": [0.0, 0], "o": [0.0, 0]})
++    last_team, roster = {}, defaultdict(set)
++    played = defaultdict(set)
++    out = {}
++    for day in sorted(by_date):
++        today = by_date[day]
++        vac_cache = {}
++        for x in today:
++            h = list(hist[x["pid"]])
++            if len(h) < 3:
++                continue
++            o = opp.get((x["gid"], x["tid"]))
++            th, oh = list(team_hist[x["tid"]]), list(team_hist[o]) if o else []
++            f = {}
++            # ---- three-pointers
++            g5 = [p for p in h if p["min"] >= 5]
++            f["fg3a_pm"] = ewma([p["fg3a"] / p["min"] for p in g5], HL) if g5 else None
++            lg = league["fg3m"] / league["fg3a"] if league["fg3a"] > 0 else 0.36
++            c = career[x["pid"]]
++            f["fg3_pct_shrunk"] = (c["fg3m"] + K3 * lg) / (c["fg3a"] + K3)
++            a5, m5 = sum(p["fg3a"] for p in h[-5:]), sum(p["fg3m"] for p in h[-5:])
++            f["hot_gap"] = (m5 / a5 - f["fg3_pct_shrunk"]) if a5 >= 10 else None
++            r5 = [p["fg3a"] / p["min"] for p in g5[-5:]]
++            r20 = [p["fg3a"] / p["min"] for p in g5[-20:]]
++            f["attempt_trend"] = (sum(r5) / len(r5) - sum(r20) / len(r20)) if r5 and r20 else None
++            # ---- rebounds: team opportunities
++            if len(th) >= 5 and len(oh) >= 5:
++                f["exp_dreb_opps"] = 0.5 * sum(t["own_miss"] for t in oh) / len(oh) + 0.5 * sum(t["opp_miss"] for t in th) / len(th)
++                f["exp_oreb_opps"] = 0.5 * sum(t["own_miss"] for t in th) / len(th) + 0.5 * sum(t["opp_miss"] for t in oh) / len(oh)
++                f["opp_oreb_rate"] = sum(t["oreb"] for t in oh) / max(1.0, sum(t["own_miss"] for t in oh))
++            # player shares, shrunk toward the position mean to date
++            ds = [p["dreb"] / (p["opp_miss"] * p["min"] / 48) for p in g5 if p["opp_miss"] > 0]
++            os_ = [p["oreb"] / (p["own_miss"] * p["min"] / 48) for p in g5 if p["own_miss"] > 0]
++            ps = pos_share[x["pos"]]
++            pd_ = ps["d"][0] / ps["d"][1] if ps["d"][1] else 0.08
++            po_ = ps["o"][0] / ps["o"][1] if ps["o"][1] else 0.03
++            n = len(ds)
++            f["dreb_share"] = ((ewma(ds, HL) * n + pd_ * KS) / (n + KS)) if ds else pd_
++            n = len(os_)
++            f["oreb_share"] = ((ewma(os_, HL) * n + po_ * KS) / (n + KS)) if os_ else po_
++            # ---- vacated teammates (absent from the team's previous game; pregame-known)
++            if x["tid"] not in vac_cache:
++                sched = [s for s in team_sched.get(x["tid"], []) if s[0] < day]
++                absent = []
++                if sched:
++                    prev_gid = sched[-1][1]
++                    recent = {g_ for _, g_ in sched[-5:]}
++                    for pid in roster[x["tid"]]:
++                        ph = list(hist[pid])
++                        if not ph or ph[-1]["gid"] not in recent:
++                            continue
++                        last10 = ph[-10:]
++                        if sum(p["min_adj"] for p in last10) / len(last10) >= ROTATION_MIN and pid not in played.get(prev_gid, set()):
++                            absent.append((pid, sum(p["reb"] for p in last10) / len(last10), sum(p["ast"] for p in last10) / len(last10)))
++                vac_cache[x["tid"]] = absent
++            others = [a for a in vac_cache[x["tid"]] if a[0] != x["pid"]]
++            f["vacated_reb"] = sum(a[1] for a in others)
++            f["vacated_ast"] = sum(a[2] for a in others)
++            # ---- matchup features from R11
++            mf = matchup.get((x["gid"], x["pid"]), {})
++            for k in ("height_diff", "opp_fg3a_rate", "height_in", "opp_size_in"):
++                f[k] = mf.get(k)
++            # ---- tracking (optional)
++            if tracking is not None:
++                tr = [p for p in g5 if p.get("chances") is not None]
++                f["chances_pm"] = ewma([p["chances"] / p["min"] for p in tr], HL) if tr else None
++                lc = league["reb"] / league["chances"] if league["chances"] > 0 else 0.6
++                f["chance_conv"] = (c["reb"] + KC * lc) / (c["chances"] + KC) if c["chances"] > 0 else None
++                f["tracking_games"] = len(tr)
++            out[(x["gid"], x["pid"])] = f
++        # ---- fold today's results into history
++        agg = defaultdict(lambda: {"fga": 0.0, "fgm": 0.0, "fg3a": 0.0, "oreb": 0.0, "dreb": 0.0})
++        for x in today:
++            a = agg[(x["gid"], x["tid"])]
++            for k in a:
++                a[k] += _f(x["row"], k)
++        team_game = {}
++        for (gid, tid), a in agg.items():
++            o = opp.get((gid, tid))
++            oa = agg.get((gid, o), {"fga": 0.0, "fgm": 0.0})
++            team_game[(gid, tid)] = {"own_miss": a["fga"] - a["fgm"], "opp_miss": oa["fga"] - oa["fgm"],
++                                     "oreb": a["oreb"], "dreb": a["dreb"], "fg3a": a["fg3a"]}
++        for k, v in team_game.items():
++            team_hist[k[1]].append(v)
++        for x in today:
++            played[x["gid"]].add(x["pid"])
++        for x in today:
++            r = x["row"]
++            tg = team_game[(x["gid"], x["tid"])]
++            tv = (tracking or {}).get((x["gid"], x["pid"]))
++            ch = None
++            if tv is not None and tv.get("rebound_chances_total") is not None:
++                ch = float(tv["rebound_chances_total"])
++            rec = {"gid": x["gid"], "min": x["min"], "min_adj": x["min"], "fg3a": _f(r, "fg3a"), "fg3m": _f(r, "fg3m"),
++                   "dreb": _f(r, "dreb"), "oreb": _f(r, "oreb"), "reb": _f(r, "reb"), "ast": _f(r, "ast"),
++                   "own_miss": tg["own_miss"], "opp_miss": tg["opp_miss"], "chances": ch}
++            hist[x["pid"]].append(rec)
++            c = career[x["pid"]]
++            c["fg3a"] += rec["fg3a"]; c["fg3m"] += rec["fg3m"]
++            league["fg3a"] += rec["fg3a"]; league["fg3m"] += rec["fg3m"]
++            if ch is not None:
++                c["reb"] += rec["reb"]; c["chances"] += ch
++                league["reb"] += rec["reb"]; league["chances"] += ch
++            if x["min"] >= 5:
++                if tg["opp_miss"] > 0:
++                    pos_share[x["pos"]]["d"][0] += rec["dreb"] / (tg["opp_miss"] * x["min"] / 48); pos_share[x["pos"]]["d"][1] += 1
++                if tg["own_miss"] > 0:
++                    pos_share[x["pos"]]["o"][0] += rec["oreb"] / (tg["own_miss"] * x["min"] / 48); pos_share[x["pos"]]["o"][1] += 1
++            if last_team.get(x["pid"]) not in (None, x["tid"]):
++                roster[last_team[x["pid"]]].discard(x["pid"])
++            last_team[x["pid"]] = x["tid"]
++            roster[x["tid"]].add(x["pid"])
++    return out
+diff --git a/v13/r14_models.py b/v13/r14_models.py
+new file mode 100644
+index 0000000..02e5624
+--- /dev/null
++++ b/v13/r14_models.py
+@@ -0,0 +1,84 @@
++"""Round 14 count models: three-point attempts x conversion, and rebound opportunity GLM."""
++import math
++
++import numpy as np
++
++
++def nb_pmf_vector(mu, phi, kmax):
++    """P(X = 0..kmax) for X ~ NegBin(mean mu, Var = mu + phi mu^2)."""
++    mu = max(mu, 1e-6); r = 1.0 / max(phi, 1e-6)
++    p = np.empty(kmax + 1)
++    p[0] = (r / (r + mu)) ** r
++    for k in range(kmax):
++        p[k + 1] = p[k] * (k + r) / (k + 1) * mu / (r + mu)
++    return p
++
++
++def nb_logpmf(k, mu, phi):
++    mu = max(mu, 1e-6); r = 1.0 / max(phi, 1e-6)
++    k = int(round(k))
++    return (math.lgamma(k + r) - math.lgamma(r) - math.lgamma(k + 1)
++            + r * math.log(r / (r + mu)) + k * math.log(mu / (r + mu)))
++
++
++def threes_over_prob(mu_att, phi_att, pct, line, amax=40):
++    """P(3PM > line) when attempts ~ NB(mu_att, phi_att) and makes | attempts ~ Binomial(attempts, pct)."""
++    pa = nb_pmf_vector(mu_att, phi_att, amax)
++    k = int(math.floor(line))
++    total = 0.0
++    for a in range(amax + 1):
++        if a <= k:
++            continue
++        # P(Bin(a, pct) <= k)
++        cdf, term = 0.0, (1 - pct) ** a
++        for j in range(k + 1):
++            cdf += term
++            term *= (a - j) / (j + 1) * pct / max(1e-12, 1 - pct)
++        total += pa[a] * (1 - cdf)
++    return min(max(total, 1e-6), 1 - 1e-6)
++
++
++def threes_logpmf(m, mu_att, phi_att, pct, amax=40):
++    pa = nb_pmf_vector(mu_att, phi_att, amax)
++    m = int(round(m))
++    s = 0.0
++    for a in range(m, amax + 1):
++        s += pa[a] * math.comb(a, m) * pct ** m * (1 - pct) ** (a - m)
++    return math.log(max(s, 1e-300))
++
++
++class PoissonGLM:
++    """log E[y] = log(offset) + b0 + X b, ridge-penalized (not the intercept); IRLS."""
++
++    def __init__(self, ridge=1.0, iters=50):
++        self.ridge, self.iters = ridge, iters
++
++    def fit(self, X, y, offset):
++        X = np.asarray(X, float); y = np.asarray(y, float); lo = np.log(np.maximum(offset, 1e-6))
++        self.mu_, self.sd_ = X.mean(0), X.std(0)
++        self.sd_[self.sd_ < 1e-9] = 1.0
++        Z = np.column_stack([np.ones(len(X)), (X - self.mu_) / self.sd_])
++        b = np.zeros(Z.shape[1])
++        b[0] = math.log(max(y.mean(), 1e-6) / max(np.exp(lo).mean(), 1e-6))
++        pen = np.eye(Z.shape[1]) * self.ridge; pen[0, 0] = 0
++        for _ in range(self.iters):
++            eta = np.clip(lo + Z @ b, -20, 20); m = np.exp(eta)
++            g = Z.T @ (y - m) - pen @ b
++            H = Z.T @ (Z * m[:, None]) + pen
++            step = np.linalg.solve(H, g); b += step
++            if np.max(np.abs(step)) < 1e-8:
++                break
++        self.beta_ = b
++        H = Z.T @ (Z * np.exp(np.clip(lo + Z @ b, -20, 20))[:, None]) + pen
++        self.se_ = np.sqrt(np.clip(np.diag(np.linalg.inv(H)), 0, None))
++        return self
++
++    def predict(self, X, offset):
++        X = np.asarray(X, float)
++        Z = np.column_stack([np.ones(len(X)), (X - self.mu_) / self.sd_])
++        return np.exp(np.clip(np.log(np.maximum(offset, 1e-6)) + Z @ self.beta_, -20, 20))
++
++
++def nb_dispersion(mu, y):
++    mu, y = np.asarray(mu, float), np.asarray(y, float)
++    return max(float(np.mean((y - mu) ** 2 - mu) / max(1e-9, np.mean(mu ** 2))), 1e-6)
+-- 
+2.43.0
+
